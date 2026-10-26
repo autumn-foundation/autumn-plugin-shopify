@@ -20,6 +20,8 @@ fn every_kind_maps_to_the_documented_status() {
         ),
         (Error::GraphQl(vec!["x".into()]), 502),
         (Error::Throttled { retries: 3 }, 503),
+        (Error::UnexpectedResponse("x".into()), 502),
+        (Error::InProgress("w".into()), 409),
         (Error::StateMismatch, 403),
         (
             Error::ScopeMismatch {

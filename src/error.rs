@@ -2,6 +2,10 @@
 //!
 //! [`Error`] is the plugin error. [`ErrorKind`] classifies it.
 //! [`Error::to_autumn_error`] maps each kind to an HTTP status.
+//!
+//! Do not use `?` to change an [`Error`] into an [`AutumnError`]. Autumn has
+//! a blanket `From` impl that gives 500 for every error. Call
+//! [`Error::to_autumn_error`].
 
 use autumn_web::AutumnError;
 use autumn_web::reexports::http::StatusCode;
@@ -29,19 +33,23 @@ pub enum ErrorKind {
     GraphQl,
     /// Shopify throttled the call and the retries ran out.
     Throttled,
+    /// Shopify answered 200, but the body has the wrong shape.
+    UnexpectedResponse,
+    /// Another delivery of this webhook id still runs.
+    InProgress,
     /// The OAuth state does not match the browser cookie.
     StateMismatch,
     /// The merchant did not grant all requested scopes.
     ScopeMismatch,
     /// The shop has no stored access token.
     NotInstalled,
-    /// The token cannot refresh; the merchant must install again.
+    /// The token cannot refresh. The merchant must install the app again.
     Reauthorize,
     /// OAuth is off (`[shopify] app_url` is not set).
     OAuthDisabled,
     /// A token or delivery store failed.
     Store,
-    /// The plugin runtime is not installed.
+    /// The app does not use the plugin (no runtime in the app state).
     MissingRuntime,
 }
 
@@ -96,6 +104,14 @@ pub enum Error {
         retries: u32,
     },
 
+    /// Shopify answered 200, but the body has the wrong shape.
+    #[error("shopify response has the wrong shape: {0}")]
+    UnexpectedResponse(String),
+
+    /// Another delivery of this webhook id still runs.
+    #[error("shopify webhook {0} is in progress")]
+    InProgress(String),
+
     /// The OAuth state does not match the browser cookie.
     #[error("shopify oauth state does not match")]
     StateMismatch,
@@ -108,10 +124,10 @@ pub enum Error {
     },
 
     /// The shop has no stored access token.
-    #[error("shop {0} is not installed")]
+    #[error("shop {0} has no stored token; install the app")]
     NotInstalled(String),
 
-    /// The token cannot refresh; the merchant must install again.
+    /// The token cannot refresh. The merchant must install the app again.
     #[error("shop {0} must install the app again")]
     Reauthorize(String),
 
@@ -123,8 +139,8 @@ pub enum Error {
     #[error("shopify store error: {0}")]
     Store(String),
 
-    /// The plugin runtime is not installed.
-    #[error("shopify runtime not installed")]
+    /// The app does not use the plugin (no runtime in the app state).
+    #[error("shopify runtime is missing; add ShopifyPlugin to the app")]
     MissingRuntime,
 }
 
@@ -142,6 +158,8 @@ impl Error {
             Self::ShopifyApi { .. } => ErrorKind::ShopifyApi,
             Self::GraphQl(_) => ErrorKind::GraphQl,
             Self::Throttled { .. } => ErrorKind::Throttled,
+            Self::UnexpectedResponse(_) => ErrorKind::UnexpectedResponse,
+            Self::InProgress(_) => ErrorKind::InProgress,
             Self::StateMismatch => ErrorKind::StateMismatch,
             Self::ScopeMismatch { .. } => ErrorKind::ScopeMismatch,
             Self::NotInstalled(_) => ErrorKind::NotInstalled,
@@ -163,7 +181,11 @@ impl Error {
             ErrorKind::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ErrorKind::StateMismatch | ErrorKind::ScopeMismatch => StatusCode::FORBIDDEN,
             ErrorKind::OAuthDisabled => StatusCode::NOT_FOUND,
-            ErrorKind::Http | ErrorKind::ShopifyApi | ErrorKind::GraphQl => StatusCode::BAD_GATEWAY,
+            ErrorKind::InProgress => StatusCode::CONFLICT,
+            ErrorKind::Http
+            | ErrorKind::ShopifyApi
+            | ErrorKind::GraphQl
+            | ErrorKind::UnexpectedResponse => StatusCode::BAD_GATEWAY,
             ErrorKind::Throttled | ErrorKind::MissingRuntime => StatusCode::SERVICE_UNAVAILABLE,
             ErrorKind::Config | ErrorKind::Store => StatusCode::INTERNAL_SERVER_ERROR,
         }

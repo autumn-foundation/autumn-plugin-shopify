@@ -22,9 +22,15 @@
 //!    and the webhook URL to `https://<your-host>/shopify/webhooks`.
 //! 5. Run `cargo run --example shop_app`, then open
 //!    `https://<your-host>/shopify/auth?shop=<store>.myshopify.com`.
+//!
+//! This example stores no customer data, so the compliance handlers only
+//! log. A real app must send or delete the data it keeps.
 
-use autumn_plugin_shopify::{ShopDomain, Shopify, ShopifyPlugin, Topic, WebhookContext};
+use autumn_plugin_shopify::{
+    ErrorKind, InstallContext, ShopDomain, Shopify, ShopifyPlugin, Topic, WebhookContext,
+};
 use autumn_web::prelude::*;
+use autumn_web::reexports::axum::response::{IntoResponse, Redirect, Response};
 
 /// Log each new order. Slow work belongs in a background job: Shopify
 /// waits only 5 seconds.
@@ -53,27 +59,65 @@ async fn shop_redact(ctx: WebhookContext) -> AutumnResult<()> {
     Ok(())
 }
 
-/// Show the name of an installed shop.
-#[get("/shops/{shop}")]
-async fn shop_name(shopify: Shopify, Path(shop): Path<String>) -> AutumnResult<String> {
-    let shop = ShopDomain::parse(&shop).map_err(|err| err.to_autumn_error())?;
-    let client = shopify
-        .client_for(&shop)
+/// After an install: subscribe to `app/uninstalled`. Errors give 500.
+async fn installed(ctx: InstallContext) -> AutumnResult<()> {
+    let client = ctx
+        .shopify
+        .client_for(&ctx.shop)
         .await
         .map_err(|err| err.to_autumn_error())?;
+    let app_url = ctx
+        .shopify
+        .runtime()
+        .config()
+        .app_url
+        .clone()
+        .unwrap_or_default();
+    let url = format!("{}/shopify/webhooks", app_url.trim_end_matches('/'));
+    client
+        .subscribe_webhook(Topic::APP_UNINSTALLED, &url)
+        .await
+        .map_err(|err| err.to_autumn_error())?;
+    Ok(())
+}
+
+/// The page after an install. The `shop` value is not signed: do not open
+/// a session from it.
+#[get("/")]
+#[public]
+async fn home() -> &'static str {
+    "Installed."
+}
+
+/// Show the name of an installed shop.
+///
+/// DEMO ONLY: this route has no authentication, so anyone can read the
+/// name of any installed shop. Guard it with `#[secured]` in a real app.
+#[get("/shops/{shop}")]
+#[public]
+async fn shop_name(shopify: Shopify, Path(shop): Path<String>) -> AutumnResult<Response> {
+    let shop = ShopDomain::parse(&shop).map_err(|err| err.to_autumn_error())?;
+    let client = match shopify.client_for(&shop).await {
+        Ok(client) => client,
+        Err(err) if matches!(err.kind(), ErrorKind::NotInstalled | ErrorKind::Reauthorize) => {
+            return Ok(Redirect::to(&Shopify::install_url(&shop)).into_response());
+        }
+        Err(err) => return Err(err.to_autumn_error()),
+    };
     let info = client
         .shop_info()
         .await
         .map_err(|err| err.to_autumn_error())?;
-    Ok(info.name)
+    Ok(info.name.into_response())
 }
 
 #[autumn_web::main]
 async fn main() {
     autumn_web::app()
-        .routes(routes![shop_name])
+        .routes(routes![home, shop_name])
         .plugin(
             ShopifyPlugin::new()
+                .on_install(installed)
                 .webhook("orders/create", order_created)
                 .webhook(Topic::CUSTOMERS_DATA_REQUEST, customer_data_request)
                 .webhook(Topic::CUSTOMERS_REDACT, customer_redact)

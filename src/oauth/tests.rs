@@ -104,14 +104,15 @@ async fn install_redirects_to_shopify_with_a_state_cookie() {
 
     let cookie = response.header("set-cookie").expect("cookie");
     assert!(
-        cookie.starts_with(&format!("{STATE_COOKIE}={nonce};")),
+        cookie.starts_with(&format!("__Host-shopify_oauth_state={nonce}.{SHOP};")),
         "{cookie}"
     );
+    assert!(!cookie.contains("Domain"), "{cookie}");
     for attribute in [
         "HttpOnly",
         "Secure",
         "SameSite=Lax",
-        "Path=/shopify/auth",
+        "Path=/;",
         "Max-Age=600",
     ] {
         assert!(cookie.contains(attribute), "{cookie} lacks {attribute}");
@@ -147,6 +148,29 @@ async fn install_nonce_comes_from_the_app_entropy() {
         param(&query_of(&location(&b)), "state"),
         "each request draws a new nonce"
     );
+}
+
+#[tokio::test]
+async fn install_checks_the_hmac_when_shopify_sends_one() {
+    let state = oauth_state(None);
+    let signed = |secret: &str| {
+        let pairs = vec![
+            ("shop".to_owned(), SHOP.to_owned()),
+            ("timestamp".to_owned(), "1793000000".to_owned()),
+        ];
+        let hmac = sign_query(secret, &pairs);
+        format!("/shopify/auth?shop={SHOP}&timestamp=1793000000&hmac={hmac}")
+    };
+    app(&state)
+        .get(&signed(SECRET))
+        .send()
+        .await
+        .assert_status(302);
+    app(&state)
+        .get(&signed("wrong-secret"))
+        .send()
+        .await
+        .assert_status(401);
 }
 
 #[tokio::test]
@@ -200,7 +224,7 @@ async fn callback_exchanges_the_code_and_stores_the_token() {
     let state = oauth_state(Some(&stub.base_url));
     let response = app(&state)
         .get(&signed_callback(&callback_params("nonce-1", SHOP), SECRET))
-        .header("cookie", &format!("other=1; {STATE_COOKIE}=nonce-1"))
+        .header("cookie", &format!("other=1; {STATE_COOKIE}=nonce-1.{SHOP}"))
         .send()
         .await;
     response.assert_status(302);
@@ -232,6 +256,7 @@ async fn callback_exchanges_the_code_and_stores_the_token() {
     assert_eq!(token.expires_at, Some(NOW + 3600));
     assert_eq!(token.refresh_token.as_deref(), Some("shprt_new"));
     assert_eq!(token.refresh_token_expires_at, Some(NOW + 7_776_000));
+    assert_eq!(token.installed_at, Some(NOW));
 }
 
 #[tokio::test]
@@ -243,7 +268,7 @@ async fn callback_rejects_a_bad_hmac_with_401() {
             &callback_params("n", SHOP),
             "wrong-secret",
         ))
-        .header("cookie", &format!("{STATE_COOKIE}=n"))
+        .header("cookie", &format!("{STATE_COOKIE}=n.{SHOP}"))
         .send()
         .await
         .assert_status(401);
@@ -251,7 +276,7 @@ async fn callback_rejects_a_bad_hmac_with_401() {
         .get(&format!(
             "/shopify/auth/callback?code=c&shop={SHOP}&state=n"
         ))
-        .header("cookie", &format!("{STATE_COOKIE}=n"))
+        .header("cookie", &format!("{STATE_COOKIE}=n.{SHOP}"))
         .send()
         .await
         .assert_status(401);
@@ -265,7 +290,7 @@ async fn callback_rejects_a_state_mismatch_with_403() {
     let url = signed_callback(&callback_params("nonce-1", SHOP), SECRET);
     app(&state)
         .get(&url)
-        .header("cookie", &format!("{STATE_COOKIE}=other"))
+        .header("cookie", &format!("{STATE_COOKIE}=other.{SHOP}"))
         .send()
         .await
         .assert_status(403);
@@ -274,12 +299,121 @@ async fn callback_rejects_a_state_mismatch_with_403() {
 }
 
 #[tokio::test]
+async fn callback_rejects_a_cookie_for_another_shop_or_a_repeated_cookie() {
+    let stub = Stub::start(vec![]).await;
+    let state = oauth_state(Some(&stub.base_url));
+    let url = signed_callback(&callback_params("n", SHOP), SECRET);
+    app(&state)
+        .get(&url)
+        .header(
+            "cookie",
+            &format!("{STATE_COOKIE}=n.attacker.myshopify.com"),
+        )
+        .send()
+        .await
+        .assert_status(403);
+    app(&state)
+        .get(&url)
+        .header(
+            "cookie",
+            &format!("{STATE_COOKIE}=n.{SHOP}; {STATE_COOKIE}=m.{SHOP}"),
+        )
+        .send()
+        .await
+        .assert_status(403);
+    let empty_state = signed_callback(&callback_params("", SHOP), SECRET);
+    app(&state)
+        .get(&empty_state)
+        .header("cookie", &format!("{STATE_COOKIE}=.{SHOP}"))
+        .send()
+        .await
+        .assert_status(403);
+    assert!(stub.requests().is_empty());
+}
+
+#[tokio::test]
+async fn callback_runs_the_install_handler_after_the_token_is_stored() {
+    use std::sync::{Arc, Mutex};
+    let stub = Stub::start(vec![StubResponse::json(200, &token_json())]).await;
+    let seen = Arc::new(Mutex::new(None));
+    let record = Arc::clone(&seen);
+    let plugin = ShopifyPlugin::new()
+        .admin_base_url(stub.base_url.clone())
+        .on_install(move |ctx: crate::plugin::InstallContext| {
+            let record = Arc::clone(&record);
+            async move {
+                let client = ctx
+                    .shopify
+                    .client_for(&ctx.shop)
+                    .await
+                    .map_err(|e| e.to_autumn_error())?;
+                *record.lock().expect("lock") =
+                    Some((ctx.shop.to_string(), ctx.scope, client.shop().to_string()));
+                Ok(())
+            }
+        });
+    let state = state(Some(
+        plugin
+            .build_runtime(config(Some(OAUTH_TOML), &[]))
+            .expect("runtime"),
+    ));
+    app(&state)
+        .get(&signed_callback(&callback_params("n", SHOP), SECRET))
+        .header("cookie", &format!("{STATE_COOKIE}=n.{SHOP}"))
+        .send()
+        .await
+        .assert_status(302);
+    let seen = seen.lock().expect("lock").clone();
+    assert_eq!(
+        seen,
+        Some((
+            SHOP.to_owned(),
+            "write_orders,write_products".to_owned(),
+            SHOP.to_owned()
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_failing_install_handler_is_500_and_keeps_the_token() {
+    let stub = Stub::start(vec![StubResponse::json(200, &token_json())]).await;
+    let plugin = ShopifyPlugin::new()
+        .admin_base_url(stub.base_url.clone())
+        .on_install(|_ctx: crate::plugin::InstallContext| async {
+            Err(autumn_web::AutumnError::internal_server_error_msg(
+                "db down",
+            ))
+        });
+    let state = state(Some(
+        plugin
+            .build_runtime(config(Some(OAUTH_TOML), &[]))
+            .expect("runtime"),
+    ));
+    app(&state)
+        .get(&signed_callback(&callback_params("n", SHOP), SECRET))
+        .header("cookie", &format!("{STATE_COOKIE}=n.{SHOP}"))
+        .send()
+        .await
+        .assert_status(500);
+    let runtime = state.extension::<ShopifyRuntime>().expect("runtime");
+    let shop = ShopDomain::parse(SHOP).expect("shop");
+    assert!(
+        runtime
+            .token_store()
+            .get(&shop)
+            .await
+            .expect("get")
+            .is_some()
+    );
+}
+
+#[tokio::test]
 async fn callback_rejects_a_bad_shop_with_400() {
     let stub = Stub::start(vec![]).await;
     let state = oauth_state(Some(&stub.base_url));
     app(&state)
         .get(&signed_callback(&callback_params("n", "evil.com"), SECRET))
-        .header("cookie", &format!("{STATE_COOKIE}=n"))
+        .header("cookie", &format!("{STATE_COOKIE}=n.{SHOP}"))
         .send()
         .await
         .assert_status(400);
@@ -296,7 +430,7 @@ async fn callback_rejects_repeated_params_and_missing_code() {
     );
     app(&state)
         .get(&repeated)
-        .header("cookie", &format!("{STATE_COOKIE}=n"))
+        .header("cookie", &format!("{STATE_COOKIE}=n.{SHOP}"))
         .send()
         .await
         .assert_status(400);
@@ -306,7 +440,7 @@ async fn callback_rejects_repeated_params_and_missing_code() {
     );
     app(&state)
         .get(&no_code)
-        .header("cookie", &format!("{STATE_COOKIE}=n"))
+        .header("cookie", &format!("{STATE_COOKIE}=n.{SHOP}"))
         .send()
         .await
         .assert_status(400);
@@ -321,7 +455,7 @@ async fn callback_rejects_missing_scopes_with_403() {
     let state = oauth_state(Some(&stub.base_url));
     let response = app(&state)
         .get(&signed_callback(&callback_params("n", SHOP), SECRET))
-        .header("cookie", &format!("{STATE_COOKIE}=n"))
+        .header("cookie", &format!("{STATE_COOKIE}=n.{SHOP}"))
         .send()
         .await;
     response.assert_status(403);
@@ -352,7 +486,7 @@ async fn callback_maps_exchange_failure_to_502_without_secrets() {
     let state = oauth_state(Some(&stub.base_url));
     let response = app(&state)
         .get(&signed_callback(&callback_params("n", SHOP), SECRET))
-        .header("cookie", &format!("{STATE_COOKIE}=n"))
+        .header("cookie", &format!("{STATE_COOKIE}=n.{SHOP}"))
         .send()
         .await;
     response.assert_status(502);
@@ -429,24 +563,46 @@ fn cookie_value_finds_the_named_cookie() {
     let mut headers = HeaderMap::new();
     headers.append(
         "cookie",
-        "a=1; shopify_oauth_state=xyz".parse().expect("header"),
+        "a=1; __Host-shopify_oauth_state=xyz"
+            .parse()
+            .expect("header"),
     );
     headers.append("cookie", "b=2".parse().expect("header"));
     assert_eq!(cookie_value(&headers, STATE_COOKIE), Some("xyz"));
     assert_eq!(cookie_value(&headers, "b"), Some("2"));
     assert_eq!(cookie_value(&headers, "shopify_oauth"), None);
     assert_eq!(cookie_value(&HeaderMap::new(), "a"), None);
+    headers.append("cookie", "b=3".parse().expect("header"));
+    assert_eq!(
+        cookie_value(&headers, "b"),
+        None,
+        "a repeated cookie is refused"
+    );
 }
 
 #[test]
 fn cookies_have_the_hardened_attributes() {
+    let shop = ShopDomain::parse(SHOP).expect("shop");
     assert_eq!(
-        state_cookie("n1"),
-        "shopify_oauth_state=n1; Path=/shopify/auth; Max-Age=600; HttpOnly; Secure; SameSite=Lax"
+        state_cookie("n1", &shop),
+        "__Host-shopify_oauth_state=n1.my-store.myshopify.com; Max-Age=600; Path=/; HttpOnly; Secure; SameSite=Lax"
     );
     assert_eq!(
         clear_state_cookie(),
-        "shopify_oauth_state=; Path=/shopify/auth; Max-Age=0; HttpOnly; Secure; SameSite=Lax"
+        "__Host-shopify_oauth_state=; Max-Age=0; Path=/; HttpOnly; Secure; SameSite=Lax"
+    );
+}
+
+#[test]
+fn after_install_location_keeps_an_existing_query() {
+    let shop = ShopDomain::parse(SHOP).expect("shop");
+    assert_eq!(
+        after_install_location("/welcome", &shop),
+        "/welcome?shop=my-store.myshopify.com"
+    );
+    assert_eq!(
+        after_install_location("/app?tab=home", &shop),
+        "/app?tab=home&shop=my-store.myshopify.com"
     );
 }
 

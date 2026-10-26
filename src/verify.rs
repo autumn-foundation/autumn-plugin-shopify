@@ -4,8 +4,9 @@
 //!
 //! - Webhooks: the raw body. The base64 digest travels in
 //!   `X-Shopify-Hmac-Sha256`. See [`verify_webhook`].
-//! - OAuth redirects: the query string without `hmac`, sorted by key. The
-//!   hex digest travels in the `hmac` parameter. See [`verify_query`].
+//! - OAuth redirects: the decoded query pairs without `hmac`, sorted by
+//!   key. The hex digest travels in the `hmac` parameter. See
+//!   [`verify_query`].
 //!
 //! Both checks fail closed and compare in constant time. A
 //! [`SecretSet`] holds the current secret and, during rotation, the
@@ -94,8 +95,8 @@ pub fn verify_webhook(secrets: &SecretSet, header: Option<&str>, body: &[u8]) ->
 
 /// Sign OAuth query parameters: hex HMAC-SHA256 of the canonical message.
 ///
-/// `params` are decoded `(key, value)` pairs. `hmac` and `signature` are
-/// left out of the message. Use it in tests to make callback URLs.
+/// `params` are decoded `(key, value)` pairs. The message leaves out
+/// `hmac`. Use it in tests to make callback URLs.
 #[must_use]
 pub fn sign_query(secret: &str, params: &[(String, String)]) -> String {
     mac(secret, query_message(params).as_bytes())
@@ -123,35 +124,19 @@ pub fn verify_query(secrets: &SecretSet, params: &[(String, String)]) -> Result<
 
 /// Build the message Shopify signs for a query.
 ///
-/// Drop `hmac` and `signature`, escape `%` and `&` (and `=` in keys),
-/// sort by key then value, and join `key=value` pairs with `&`.
+/// Drop `hmac`, sort the decoded pairs by key (then value), and join
+/// `key=value` with `&`. This is the rule on shopify.dev
+/// ("Authorization code grant", 2026-10).
 #[must_use]
 pub fn query_message(params: &[(String, String)]) -> String {
-    let mut pairs: Vec<(String, String)> = params
-        .iter()
-        .filter(|(key, _)| key != "hmac" && key != "signature")
-        .map(|(key, value)| (escape(key, true), escape(value, false)))
-        .collect();
+    let mut pairs: Vec<&(String, String)> =
+        params.iter().filter(|(key, _)| key != "hmac").collect();
     pairs.sort();
     pairs
         .iter()
         .map(|(key, value)| format!("{key}={value}"))
         .collect::<Vec<_>>()
         .join("&")
-}
-
-/// Escape `%` and `&`, and `=` too when `is_key`.
-fn escape(text: &str, is_key: bool) -> String {
-    let mut out = String::with_capacity(text.len());
-    for c in text.chars() {
-        match c {
-            '%' => out.push_str("%25"),
-            '&' => out.push_str("%26"),
-            '=' if is_key => out.push_str("%3D"),
-            other => out.push(other),
-        }
-    }
-    out
 }
 
 /// The HMAC-SHA256 of `message` under `secret`.

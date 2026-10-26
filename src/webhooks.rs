@@ -15,15 +15,18 @@
 
 use std::collections::HashMap;
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::pin::Pin;
 use std::sync::Arc;
 
 use autumn_web::reexports::axum::body::{Bytes, to_bytes};
 use autumn_web::reexports::axum::extract::{FromRequest, Request};
 use autumn_web::reexports::http::{HeaderMap, StatusCode};
-use autumn_web::{AppState, AutumnError, AutumnResult, State, post, routes};
+use autumn_web::{AppState, AutumnError, AutumnResult, State, post, public, routes};
+use futures::FutureExt as _;
 use serde::de::DeserializeOwned;
 
+use crate::delivery::Claim;
 use crate::error::{Error, Result};
 use crate::plugin::{Shopify, ShopifyRuntime};
 use crate::types::{ShopDomain, Topic};
@@ -48,6 +51,11 @@ pub const TRIGGERED_AT_HEADER: &str = "x-shopify-triggered-at";
 ///
 /// Use it on a custom route. HMAC failures give 401 before the handler
 /// runs. `Debug` leaves out the body.
+///
+/// The HMAC covers the body only. The `X-Shopify-*` headers (topic, shop,
+/// ids, times) are not signed. Read the shop from the body when a wrong
+/// shop can do damage.
+#[non_exhaustive]
 pub struct VerifiedWebhook {
     /// The topic, for example `orders/create`.
     pub topic: Topic,
@@ -129,9 +137,13 @@ impl FromRequest<AppState> for VerifiedWebhook {
             .extension::<ShopifyRuntime>()
             .ok_or_else(|| Error::MissingRuntime.to_autumn_error())?;
         let (parts, body) = req.into_parts();
-        let body = to_bytes(body, MAX_BODY_BYTES).await.map_err(|_| {
-            Error::PayloadTooLarge {
-                limit: MAX_BODY_BYTES,
+        let body = to_bytes(body, MAX_BODY_BYTES).await.map_err(|err| {
+            if is_length_limit(&err) {
+                Error::PayloadTooLarge {
+                    limit: MAX_BODY_BYTES,
+                }
+            } else {
+                Error::InvalidRequest("the webhook body does not read".to_owned())
             }
             .to_autumn_error()
         })?;
@@ -143,7 +155,11 @@ impl FromRequest<AppState> for VerifiedWebhook {
 }
 
 /// What a webhook handler receives.
+///
+/// The HMAC covers `body` only. The header values (`topic`, `shop`, the
+/// ids, `triggered_at`) are not signed.
 #[derive(Clone)]
+#[non_exhaustive]
 pub struct WebhookContext {
     /// The topic.
     pub topic: Topic,
@@ -177,6 +193,38 @@ impl std::fmt::Debug for WebhookContext {
 }
 
 impl WebhookContext {
+    /// Make a context, for example to test a handler. The optional header
+    /// values start as `None`.
+    #[must_use]
+    pub fn new(
+        topic: Topic,
+        shop: ShopDomain,
+        webhook_id: impl Into<String>,
+        body: impl Into<Bytes>,
+        shopify: Shopify,
+    ) -> Self {
+        Self {
+            topic,
+            shop,
+            webhook_id: webhook_id.into(),
+            event_id: None,
+            api_version: None,
+            triggered_at: None,
+            body: body.into(),
+            state: shopify.state().clone(),
+            shopify,
+        }
+    }
+
+    /// The Admin API client for the shop that sent the webhook.
+    ///
+    /// # Errors
+    ///
+    /// See [`ShopifyRuntime::client_for`].
+    pub async fn client(&self) -> Result<crate::client::ShopifyClient> {
+        self.shopify.client_for(&self.shop).await
+    }
+
     /// Parse the body as JSON.
     ///
     /// # Errors
@@ -270,12 +318,13 @@ impl WebhookRegistry {
 
 /// What the webhook route did with one delivery.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum WebhookOutcome {
     /// A handler ran and succeeded.
     Handled,
-    /// The webhook id was seen before; nothing ran.
+    /// The store already has this webhook id as done. No handler ran.
     Duplicate,
-    /// No handler is registered for the topic.
+    /// The topic has no handler.
     Unhandled,
 }
 
@@ -284,36 +333,67 @@ pub enum WebhookOutcome {
 /// The plugin route calls this. Call it from a custom route that uses
 /// [`VerifiedWebhook`].
 ///
+/// The handler runs in its own task. A panic in the handler, or a request
+/// that the server drops (timeout, closed connection), does not keep the
+/// claim: the task releases it, so that the next Shopify retry runs the
+/// handler again.
+///
 /// # Errors
 ///
-/// Returns the handler error, or a store error. The claim is released
-/// first, so that a Shopify retry runs again.
+/// Returns [`Error::InProgress`] (409) when another delivery of the same
+/// webhook id still runs, the handler error, a panic as 500, or a store
+/// error.
 pub async fn process(state: &AppState, webhook: VerifiedWebhook) -> AutumnResult<WebhookOutcome> {
     let runtime = Arc::clone(&webhook.runtime);
-    let deliveries = runtime.delivery_store();
     let now = state.clock().now().timestamp();
-    let fresh = deliveries
+    let claim = runtime
+        .delivery_store()
         .claim(&webhook.webhook_id, now)
         .await
         .map_err(|err| err.to_autumn_error())?;
-    if !fresh {
-        tracing::info!(
-            topic = %webhook.topic,
-            shop = %webhook.shop,
-            webhook_id = %webhook.webhook_id,
-            "shopify webhook is a duplicate; skipped"
-        );
-        return Ok(WebhookOutcome::Duplicate);
-    }
-    let webhook_id = webhook.webhook_id.clone();
-    let result = dispatch(state, webhook).await;
-    if result.is_err() {
-        // Release the claim, so that the Shopify retry runs again.
-        if let Err(err) = deliveries.release(&webhook_id).await {
-            tracing::error!(error = %err, webhook_id = %webhook_id, "shopify webhook claim release failed");
+    match claim {
+        Claim::Fresh => {}
+        Claim::Done => {
+            tracing::info!(
+                topic = %webhook.topic,
+                shop = %webhook.shop,
+                webhook_id = %webhook.webhook_id,
+                "shopify webhook is a duplicate; skipped"
+            );
+            return Ok(WebhookOutcome::Duplicate);
+        }
+        _ => {
+            return Err(Error::InProgress(webhook.webhook_id).to_autumn_error());
         }
     }
-    result
+    let state = state.clone();
+    let task = tokio::spawn(async move {
+        let webhook_id = webhook.webhook_id.clone();
+        let deliveries = Arc::clone(webhook.runtime.delivery_store());
+        let outcome = AssertUnwindSafe(dispatch(&state, webhook))
+            .catch_unwind()
+            .await
+            .unwrap_or_else(|_| {
+                tracing::error!(webhook_id = %webhook_id, "shopify webhook handler panicked");
+                Err(AutumnError::internal_server_error_msg(
+                    "the shopify webhook handler panicked",
+                ))
+            });
+        let settled = if outcome.is_ok() {
+            deliveries.complete(&webhook_id).await
+        } else {
+            deliveries.release(&webhook_id).await
+        };
+        if let Err(err) = settled {
+            tracing::error!(error = %err, webhook_id = %webhook_id, "shopify webhook claim update failed");
+        }
+        outcome
+    });
+    task.await.unwrap_or_else(|_| {
+        Err(AutumnError::internal_server_error_msg(
+            "the shopify webhook task stopped",
+        ))
+    })
 }
 
 /// Token cleanup, then the handler for the topic.
@@ -321,12 +401,18 @@ async fn dispatch(state: &AppState, webhook: VerifiedWebhook) -> AutumnResult<We
     let runtime = Arc::clone(&webhook.runtime);
     let topic = webhook.topic.as_str();
     if topic == Topic::APP_UNINSTALLED || topic == Topic::SHOP_REDACT {
-        runtime
-            .token_store()
-            .delete(&webhook.shop)
+        check_body_shop(&webhook).map_err(|err| err.to_autumn_error())?;
+        let event_at = webhook.triggered_at.as_deref().and_then(parse_time);
+        let deleted = runtime
+            .keeper()
+            .delete_for_event(&webhook.shop, event_at)
             .await
             .map_err(|err| err.to_autumn_error())?;
-        tracing::info!(shop = %webhook.shop, topic, "shopify token deleted");
+        if deleted {
+            tracing::info!(shop = %webhook.shop, topic, "shopify token deleted");
+        } else {
+            tracing::info!(shop = %webhook.shop, topic, "shopify token is from a later install; kept");
+        }
     }
     let Some(handler) = runtime.registry().get(&webhook.topic) else {
         tracing::warn!(
@@ -356,6 +442,45 @@ async fn dispatch(state: &AppState, webhook: VerifiedWebhook) -> AutumnResult<We
     Ok(WebhookOutcome::Handled)
 }
 
+/// For a token-deleting topic, check that the shop in the signed body is
+/// the shop in the (unsigned) header.
+///
+/// `app/uninstalled` carries `myshopify_domain`; `shop/redact` carries
+/// `shop_domain`. A body without the field passes.
+fn check_body_shop(webhook: &VerifiedWebhook) -> Result<()> {
+    let field = if webhook.topic.as_str() == Topic::SHOP_REDACT {
+        "shop_domain"
+    } else {
+        "myshopify_domain"
+    };
+    let body: serde_json::Value = webhook.json()?;
+    match body.get(field).and_then(serde_json::Value::as_str) {
+        Some(domain) if !domain.eq_ignore_ascii_case(webhook.shop.as_str()) => Err(
+            Error::InvalidRequest(format!("the body {field} does not match {SHOP_HEADER}")),
+        ),
+        _ => Ok(()),
+    }
+}
+
+/// Parse an RFC 3339 time into Unix seconds.
+fn parse_time(text: &str) -> Option<i64> {
+    autumn_web::reexports::chrono::DateTime::parse_from_rfc3339(text)
+        .ok()
+        .map(|time| time.timestamp())
+}
+
+/// True when `err` comes from the body length limit.
+fn is_length_limit(err: &(dyn std::error::Error + 'static)) -> bool {
+    let mut current = Some(err);
+    while let Some(err) = current {
+        if err.is::<http_body_util::LengthLimitError>() {
+            return true;
+        }
+        current = err.source();
+    }
+    false
+}
+
 /// A header value as `&str`; `None` when missing, blank, or not ASCII.
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
@@ -373,6 +498,7 @@ fn required<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str> {
 
 /// The plugin webhook route.
 #[post("/webhooks")]
+#[public]
 async fn webhooks_route(
     State(state): State<AppState>,
     webhook: VerifiedWebhook,

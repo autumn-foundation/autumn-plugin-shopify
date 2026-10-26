@@ -26,11 +26,23 @@ pub const ACCESS_TOKEN_HEADER: &str = "x-shopify-access-token";
 
 /// How the client retries throttled calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RetryPolicy {
     /// The number of retries after the first try.
     pub max_retries: u32,
     /// The longest wait before one retry.
     pub max_wait: Duration,
+}
+
+impl RetryPolicy {
+    /// Make a policy.
+    #[must_use]
+    pub const fn new(max_retries: u32, max_wait: Duration) -> Self {
+        Self {
+            max_retries,
+            max_wait,
+        }
+    }
 }
 
 impl Default for RetryPolicy {
@@ -45,6 +57,7 @@ impl Default for RetryPolicy {
 /// The shop record from [`ShopifyClient::shop_info`].
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[non_exhaustive]
 pub struct ShopInfo {
     /// The shop name.
     pub name: String,
@@ -54,7 +67,7 @@ pub struct ShopInfo {
 
 /// An Admin GraphQL client for one shop and one token.
 ///
-/// Cheap to clone. `Debug` redacts the token.
+/// A clone is cheap. `Debug` redacts the token.
 #[derive(Clone)]
 pub struct ShopifyClient {
     http: reqwest::Client,
@@ -232,14 +245,19 @@ impl ShopifyClient {
         Ok(data.shop)
     }
 
-    /// Subscribe `callback_url` to `topic` with
-    /// `webhookSubscriptionCreate`. Returns the subscription id.
+    /// Subscribe `callback_url` to `topic` (for example `orders/create`)
+    /// with `webhookSubscriptionCreate`. Returns the subscription id.
+    ///
+    /// The compliance topics are not in the GraphQL topic enum. Declare
+    /// them in `shopify.app.toml` (`compliance_topics`).
     ///
     /// # Errors
     ///
-    /// See [`query`](Self::query). Returns [`Error::GraphQl`] with the
+    /// Returns [`Error::InvalidRequest`] for a malformed topic and
+    /// [`Error::Config`] for a compliance topic. See also
+    /// [`query`](Self::query). Returns [`Error::GraphQl`] with the
     /// `userErrors` messages when Shopify refuses the subscription.
-    pub async fn subscribe_webhook(&self, topic: &Topic, callback_url: &str) -> Result<String> {
+    pub async fn subscribe_webhook(&self, topic: &str, callback_url: &str) -> Result<String> {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct Data {
@@ -259,6 +277,12 @@ impl ShopifyClient {
         #[derive(Deserialize)]
         struct UserError {
             message: String,
+        }
+        let topic = Topic::parse(topic)?;
+        if topic.is_compliance() {
+            return Err(Error::Config(format!(
+                "{topic} is a compliance topic; declare it in shopify.app.toml compliance_topics"
+            )));
         }
         let data: Data = self
             .query(
@@ -288,8 +312,11 @@ impl ShopifyClient {
 ///
 /// Returns [`Error::Http`] when the client does not build.
 pub(crate) fn http_client() -> Result<reqwest::Client> {
+    // No redirects: a redirect would carry the access token or the client
+    // secret to another host.
     reqwest::Client::builder()
         .timeout(REQUEST_TIMEOUT)
+        .redirect(reqwest::redirect::Policy::none())
         .user_agent(concat!("autumn-plugin-shopify/", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(Error::Http)
@@ -335,12 +362,9 @@ fn into_data(mut body: serde_json::Value) -> Result<serde_json::Value> {
     }
 }
 
-/// An [`Error::ShopifyApi`] for a 200 answer of the wrong shape.
+/// An [`Error::UnexpectedResponse`] for a 200 answer of the wrong shape.
 fn unexpected(detail: &str) -> Error {
-    Error::ShopifyApi {
-        status: 200,
-        body: detail.chars().take(MAX_ERROR_BODY_CHARS).collect(),
-    }
+    Error::UnexpectedResponse(detail.chars().take(MAX_ERROR_BODY_CHARS).collect())
 }
 
 /// The wait a `THROTTLED` response asks for, from `extensions.cost`.

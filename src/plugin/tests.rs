@@ -21,13 +21,11 @@ fn other_shop() -> ShopDomain {
 }
 
 fn expiring_token(expires_at: i64) -> ShopToken {
-    ShopToken {
-        access_token: "shpat_old".into(),
-        scope: "read_orders".into(),
-        expires_at: Some(expires_at),
-        refresh_token: Some("shprt_old".into()),
-        refresh_token_expires_at: Some(NOW + 86_400),
-    }
+    ShopToken::non_expiring("shpat_old", "read_orders").with_refresh(
+        expires_at,
+        "shprt_old",
+        Some(NOW + 86_400),
+    )
 }
 
 fn refreshed_json() -> serde_json::Value {
@@ -231,17 +229,8 @@ fn runtime_debug_hides_secrets() {
     assert!(!debug.contains(SECRET), "{debug}");
     assert_eq!(runtime.secrets().current(), SECRET);
     assert!(runtime.registry().topics().is_empty());
-    assert!(runtime.delivery_store().claim("x", 0).await_ready());
-}
-
-trait AwaitReady {
-    fn await_ready(self) -> bool;
-}
-
-impl AwaitReady for crate::tokens::StoreFuture<'_, bool> {
-    fn await_ready(self) -> bool {
-        futures::executor::block_on(self).expect("claim")
-    }
+    let claim = futures::executor::block_on(runtime.delivery_store().claim("x", 0));
+    assert_eq!(claim.expect("claim"), crate::delivery::Claim::Fresh);
 }
 
 // ── Clients ──────────────────────────────────────────────────────────
@@ -593,4 +582,311 @@ fn warnings_name_the_csrf_exemption() {
 fn the_refresh_margin_is_one_minute() {
     assert_eq!(REFRESH_MARGIN_SECS, 60);
     let _ = Duration::from_secs(1);
+}
+
+// ── Review round 1: refresh safety ───────────────────────────────────
+
+#[tokio::test]
+async fn a_refresh_400_keeps_the_token() {
+    let stub = Stub::start(vec![StubResponse::json(
+        400,
+        &json!({"error": "invalid_request"}),
+    )])
+    .await;
+    let runtime = oauth_runtime(&stub);
+    runtime
+        .token_store()
+        .put(&shop(), expiring_token(NOW))
+        .await
+        .expect("put");
+    let err = runtime.client_for(&shop(), NOW).await.expect_err("400");
+    assert_eq!(err.kind(), ErrorKind::ShopifyApi);
+    assert!(
+        runtime
+            .token_store()
+            .get(&shop())
+            .await
+            .expect("get")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn a_refresh_invalid_client_keeps_the_token() {
+    let stub = Stub::start(vec![StubResponse::json(
+        401,
+        &json!({"error": "invalid_client"}),
+    )])
+    .await;
+    let runtime = oauth_runtime(&stub);
+    runtime
+        .token_store()
+        .put(&shop(), expiring_token(NOW))
+        .await
+        .expect("put");
+    let err = runtime
+        .client_for(&shop(), NOW)
+        .await
+        .expect_err("bad secret");
+    assert_eq!(err.kind(), ErrorKind::ShopifyApi);
+    assert!(
+        runtime
+            .token_store()
+            .get(&shop())
+            .await
+            .expect("get")
+            .is_some()
+    );
+}
+
+#[tokio::test]
+async fn a_failed_refresh_uses_the_old_token_while_it_is_valid_and_backs_off() {
+    let stub = Stub::start(vec![StubResponse::text(503, "unavailable")]).await;
+    let runtime = oauth_runtime(&stub);
+    runtime
+        .token_store()
+        .put(&shop(), expiring_token(NOW + 30))
+        .await
+        .expect("put");
+    let client = runtime
+        .client_for(&shop(), NOW)
+        .await
+        .expect("old token still works");
+    assert_eq!(client.shop(), &shop());
+    // Inside the back-off window: no second refresh call.
+    runtime
+        .client_for(&shop(), NOW + 5)
+        .await
+        .expect("old token again");
+    assert_eq!(stub.requests().len(), 1);
+}
+
+/// A store that hands out `first` once, then `later` on every read: as if
+/// another replica stored a new pair during the refresh.
+struct SwapStore {
+    reads: std::sync::Mutex<u32>,
+    first: ShopToken,
+    later: std::sync::Mutex<Option<ShopToken>>,
+}
+
+impl TokenStore for SwapStore {
+    fn get<'a>(
+        &'a self,
+        _shop: &'a ShopDomain,
+    ) -> crate::tokens::StoreFuture<'a, Option<ShopToken>> {
+        let reads = {
+            let mut reads = self.reads.lock().expect("lock");
+            *reads += 1;
+            *reads
+        };
+        let token = if reads <= 2 {
+            Some(self.first.clone())
+        } else {
+            self.later.lock().expect("lock").clone()
+        };
+        Box::pin(async move { Ok(token) })
+    }
+
+    fn put<'a>(
+        &'a self,
+        _shop: &'a ShopDomain,
+        token: ShopToken,
+    ) -> crate::tokens::StoreFuture<'a, ()> {
+        *self.later.lock().expect("lock") = Some(token);
+        Box::pin(async { Ok(()) })
+    }
+
+    fn delete<'a>(&'a self, _shop: &'a ShopDomain) -> crate::tokens::StoreFuture<'a, ()> {
+        *self.later.lock().expect("lock") = None;
+        Box::pin(async { Ok(()) })
+    }
+}
+
+#[tokio::test]
+async fn a_refused_refresh_does_not_delete_a_pair_another_replica_stored() {
+    let stub = Stub::start(vec![StubResponse::json(
+        401,
+        &json!({"error": "invalid_request"}),
+    )])
+    .await;
+    let replica_pair = ShopToken::non_expiring("shpat_other_replica", "read_orders").with_refresh(
+        NOW + 3_600,
+        "shprt_other_replica",
+        None,
+    );
+    let store = Arc::new(SwapStore {
+        reads: std::sync::Mutex::new(0),
+        first: expiring_token(NOW),
+        later: std::sync::Mutex::new(Some(replica_pair.clone())),
+    });
+    let runtime = ShopifyPlugin::new()
+        .admin_base_url(stub.base_url.clone())
+        .token_store(store.clone())
+        .build_runtime(config(Some(OAUTH_TOML), &[]))
+        .expect("runtime");
+    let err = runtime.client_for(&shop(), NOW).await.expect_err("refused");
+    assert_eq!(err.kind(), ErrorKind::Reauthorize);
+    assert_eq!(
+        store.later.lock().expect("lock").clone(),
+        Some(replica_pair),
+        "the newer pair survives"
+    );
+}
+
+#[tokio::test]
+async fn a_cancelled_caller_does_not_lose_the_rotated_pair() {
+    let stub = Stub::start(vec![
+        StubResponse::json(200, &refreshed_json()).delayed(Duration::from_millis(200)),
+    ])
+    .await;
+    let runtime = oauth_runtime(&stub);
+    runtime
+        .token_store()
+        .put(&shop(), expiring_token(NOW))
+        .await
+        .expect("put");
+    let cancelled =
+        tokio::time::timeout(Duration::from_millis(20), runtime.client_for(&shop(), NOW)).await;
+    assert!(cancelled.is_err(), "the caller gave up");
+    tokio::time::sleep(Duration::from_millis(600)).await;
+    let stored = runtime
+        .token_store()
+        .get(&shop())
+        .await
+        .expect("get")
+        .expect("kept");
+    assert_eq!(
+        stored.access_token, "shpat_fresh",
+        "the refresh task finished"
+    );
+}
+
+#[tokio::test]
+async fn an_uninstall_during_a_refresh_wins() {
+    let stub = Stub::start(vec![
+        StubResponse::json(200, &refreshed_json()).delayed(Duration::from_millis(200)),
+    ])
+    .await;
+    let runtime = Arc::new(oauth_runtime(&stub));
+    runtime
+        .token_store()
+        .put(&shop(), expiring_token(NOW))
+        .await
+        .expect("put");
+    let refresher = {
+        let runtime = Arc::clone(&runtime);
+        tokio::spawn(async move { runtime.client_for(&shop(), NOW).await })
+    };
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    let deleted = runtime
+        .keeper()
+        .delete_for_event(&shop(), Some(NOW))
+        .await
+        .expect("delete");
+    assert!(deleted);
+    refresher
+        .await
+        .expect("joins")
+        .expect("the refresh itself worked");
+    assert!(
+        runtime
+            .token_store()
+            .get(&shop())
+            .await
+            .expect("get")
+            .is_none(),
+        "the refresh does not bring the token back"
+    );
+}
+
+#[tokio::test]
+async fn a_late_uninstall_keeps_a_token_from_a_later_install() {
+    let runtime = ShopifyPlugin::new()
+        .build_runtime(config(Some(OAUTH_TOML), &[]))
+        .expect("runtime");
+    let token = ShopToken::non_expiring("shpat_new_install", "read_orders").with_installed_at(NOW);
+    runtime
+        .token_store()
+        .put(&shop(), token)
+        .await
+        .expect("put");
+    let deleted = runtime
+        .keeper()
+        .delete_for_event(&shop(), Some(NOW - 3_600))
+        .await
+        .expect("delete");
+    assert!(!deleted);
+    assert!(
+        runtime
+            .token_store()
+            .get(&shop())
+            .await
+            .expect("get")
+            .is_some()
+    );
+    assert!(
+        runtime
+            .keeper()
+            .delete_for_event(&shop(), None)
+            .await
+            .expect("delete")
+    );
+}
+
+// ── Review round 1: plugin surface ───────────────────────────────────
+
+#[test]
+fn every_plugin_route_is_classified_public() {
+    use autumn_web::route_listing::RouteClassification;
+    let (_, infos) = mount();
+    assert_eq!(infos.len(), 3);
+    for info in &infos {
+        assert_eq!(
+            info.classification,
+            RouteClassification::Public,
+            "{} {} must pass `autumn routes audit`",
+            info.method,
+            info.path
+        );
+        assert!(info.path.starts_with("/shopify/"), "{}", info.path);
+    }
+}
+
+#[test]
+fn admin_base_url_must_be_loopback() {
+    for base in ["https://evil.example.com", "not a url", "ftp://127.0.0.1"] {
+        let err = ShopifyPlugin::new()
+            .admin_base_url(base)
+            .build_runtime(config(None, &[]))
+            .expect_err(base);
+        assert_eq!(err.kind(), ErrorKind::Config);
+    }
+    for base in [
+        "http://127.0.0.1:9",
+        "http://localhost:3000",
+        "https://[::1]:8443",
+    ] {
+        ShopifyPlugin::new()
+            .admin_base_url(base)
+            .build_runtime(config(None, &[]))
+            .expect(base);
+    }
+}
+
+#[test]
+fn warnings_name_a_half_set_single_store_mode() {
+    let runtime = ShopifyPlugin::new()
+        .build_runtime(config(None, &[("SHOPIFY_SHOP", SHOP)]))
+        .expect("runtime");
+    let warnings = startup_warnings(&runtime, &autumn_web::config::AutumnConfig::default());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(warnings[0].contains("SHOPIFY_ACCESS_TOKEN"));
+}
+
+#[test]
+fn install_url_points_at_the_install_route() {
+    assert_eq!(
+        Shopify::install_url(&shop()),
+        "/shopify/auth?shop=my-store.myshopify.com"
+    );
 }

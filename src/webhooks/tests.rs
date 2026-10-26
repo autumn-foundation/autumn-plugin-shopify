@@ -431,3 +431,240 @@ fn webhook_route_is_declared() {
     assert_eq!(routes[0].path, "/webhooks");
     assert_eq!(routes[0].method, "POST");
 }
+
+// ── Review round 1: claim safety ─────────────────────────────────────
+
+#[tokio::test]
+async fn a_panicking_handler_is_500_and_its_retry_runs_again() {
+    let calls = Arc::new(Mutex::new(0u32));
+    let counter = Arc::clone(&calls);
+    let plugin = ShopifyPlugin::new().webhook("orders/create", move |_ctx: WebhookContext| {
+        let counter = Arc::clone(&counter);
+        async move {
+            let first = {
+                let mut calls = counter.lock().expect("lock");
+                *calls += 1;
+                *calls == 1
+            };
+            assert!(!first, "the first delivery panics");
+            Ok(())
+        }
+    });
+    let state = setup(&plugin);
+    Delivery::new("orders/create", "w-panic")
+        .send(&state)
+        .await
+        .assert_status(500);
+    Delivery::new("orders/create", "w-panic")
+        .send(&state)
+        .await
+        .assert_status(200);
+    assert_eq!(*calls.lock().expect("lock"), 2);
+}
+
+#[tokio::test]
+async fn a_dropped_request_still_settles_the_claim() {
+    let calls = Arc::new(Mutex::new(0u32));
+    let counter = Arc::clone(&calls);
+    let plugin = ShopifyPlugin::new().webhook("orders/create", move |_ctx: WebhookContext| {
+        let counter = Arc::clone(&counter);
+        async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            let mut calls = counter.lock().expect("lock");
+            *calls += 1;
+            if *calls == 1 {
+                Err(AutumnError::internal_server_error_msg("slow and failed"))
+            } else {
+                Ok(())
+            }
+        }
+    });
+    let state = setup(&plugin);
+    let dropped = tokio::time::timeout(
+        std::time::Duration::from_millis(10),
+        Delivery::new("orders/create", "w-drop").send(&state),
+    )
+    .await;
+    assert!(dropped.is_err(), "the server gave up on the request");
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    Delivery::new("orders/create", "w-drop")
+        .send(&state)
+        .await
+        .assert_status(200);
+    assert_eq!(
+        *calls.lock().expect("lock"),
+        2,
+        "the retry ran the handler again"
+    );
+}
+
+#[tokio::test]
+async fn a_duplicate_while_the_first_still_runs_is_409() {
+    let gate = Arc::new(tokio::sync::Notify::new());
+    let wait = Arc::clone(&gate);
+    let plugin = ShopifyPlugin::new().webhook("orders/create", move |_ctx: WebhookContext| {
+        let wait = Arc::clone(&wait);
+        async move {
+            wait.notified().await;
+            Ok(())
+        }
+    });
+    let state = setup(&plugin);
+    let first = {
+        let state = state.clone();
+        tokio::spawn(async move { Delivery::new("orders/create", "w-slow").send(&state).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    Delivery::new("orders/create", "w-slow")
+        .send(&state)
+        .await
+        .assert_status(409);
+    gate.notify_one();
+    first.await.expect("joins").assert_status(200);
+    Delivery::new("orders/create", "w-slow")
+        .send(&state)
+        .await
+        .assert_status(200);
+}
+
+// ── Review round 1: token cleanup safety ─────────────────────────────
+
+async fn put_token(state: &AppState, token: ShopToken) -> Arc<ShopifyRuntime> {
+    let runtime = state.extension::<ShopifyRuntime>().expect("runtime");
+    let shop = ShopDomain::parse(SHOP).expect("shop");
+    runtime.token_store().put(&shop, token).await.expect("put");
+    runtime
+}
+
+#[tokio::test]
+async fn an_uninstall_for_another_shop_in_the_body_is_400_and_deletes_nothing() {
+    let state = setup(&ShopifyPlugin::new());
+    let runtime = put_token(&state, ShopToken::non_expiring("shpat_x", "read_orders")).await;
+    let body = br#"{"id":1,"myshopify_domain":"other.myshopify.com"}"#.to_vec();
+    let mut delivery = Delivery::new("app/uninstalled", "w-forged");
+    delivery.hmac = Some(sign_webhook(SECRET, &body));
+    delivery.body = body;
+    delivery.send(&state).await.assert_status(400);
+    let shop = ShopDomain::parse(SHOP).expect("shop");
+    assert!(
+        runtime
+            .token_store()
+            .get(&shop)
+            .await
+            .expect("get")
+            .is_some()
+    );
+
+    let body = format!(r#"{{"id":1,"myshopify_domain":"{SHOP}"}}"#).into_bytes();
+    let mut delivery = Delivery::new("app/uninstalled", "w-real");
+    delivery.hmac = Some(sign_webhook(SECRET, &body));
+    delivery.body = body;
+    delivery.send(&state).await.assert_status(200);
+    assert!(
+        runtime
+            .token_store()
+            .get(&shop)
+            .await
+            .expect("get")
+            .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_shop_redact_for_another_shop_is_400() {
+    let state = setup(&ShopifyPlugin::new());
+    let body = br#"{"shop_id":1,"shop_domain":"other.myshopify.com"}"#.to_vec();
+    let mut delivery = Delivery::new("shop/redact", "w-1");
+    delivery.hmac = Some(sign_webhook(SECRET, &body));
+    delivery.body = body;
+    delivery.send(&state).await.assert_status(400);
+}
+
+#[tokio::test]
+async fn a_late_uninstall_keeps_the_token_of_a_reinstall() {
+    let state = setup(&ShopifyPlugin::new());
+    // The token comes from an install after the event (the Delivery helper
+    // sends X-Shopify-Triggered-At: 2026-10-26T00:00:00Z).
+    let later = parse_time("2026-10-26T01:00:00Z").expect("time");
+    let runtime = put_token(
+        &state,
+        ShopToken::non_expiring("shpat_new", "read_orders").with_installed_at(later),
+    )
+    .await;
+    Delivery::new("app/uninstalled", "w-late")
+        .send(&state)
+        .await
+        .assert_status(200);
+    let shop = ShopDomain::parse(SHOP).expect("shop");
+    assert!(
+        runtime
+            .token_store()
+            .get(&shop)
+            .await
+            .expect("get")
+            .is_some()
+    );
+}
+
+/// A token store whose `delete` always fails.
+struct BrokenStore;
+
+impl crate::tokens::TokenStore for BrokenStore {
+    fn get<'a>(
+        &'a self,
+        _shop: &'a ShopDomain,
+    ) -> crate::tokens::StoreFuture<'a, Option<ShopToken>> {
+        Box::pin(async { Ok(None) })
+    }
+    fn put<'a>(
+        &'a self,
+        _shop: &'a ShopDomain,
+        _token: ShopToken,
+    ) -> crate::tokens::StoreFuture<'a, ()> {
+        Box::pin(async { Ok(()) })
+    }
+    fn delete<'a>(&'a self, _shop: &'a ShopDomain) -> crate::tokens::StoreFuture<'a, ()> {
+        Box::pin(async { Err(Error::Store("disk full".into())) })
+    }
+}
+
+#[tokio::test]
+async fn a_store_failure_is_500_and_releases_the_claim() {
+    let plugin = ShopifyPlugin::new().token_store(Arc::new(BrokenStore));
+    let state = setup(&plugin);
+    Delivery::new("app/uninstalled", "w-store")
+        .send(&state)
+        .await
+        .assert_status(500);
+    let runtime = state.extension::<ShopifyRuntime>().expect("runtime");
+    let claim = runtime
+        .delivery_store()
+        .claim("w-store", 0)
+        .await
+        .expect("claim");
+    assert_eq!(
+        claim,
+        crate::delivery::Claim::Fresh,
+        "the claim was released"
+    );
+}
+
+#[tokio::test]
+async fn webhook_context_new_and_client_work_in_handler_tests() {
+    let state = setup(&ShopifyPlugin::new());
+    let shopify = crate::plugin::Shopify::from_state(&state).expect("handle");
+    let ctx = WebhookContext::new(
+        Topic::parse("orders/create").expect("topic"),
+        ShopDomain::parse(SHOP).expect("shop"),
+        "w-1",
+        BODY,
+        shopify,
+    );
+    assert!(ctx.event_id.is_none());
+    assert_eq!(
+        ctx.json::<serde_json::Value>().expect("json")["id"],
+        820_982_911_946_154_508_u64
+    );
+    let err = ctx.client().await.expect_err("not installed");
+    assert_eq!(err.kind(), ErrorKind::NotInstalled);
+}

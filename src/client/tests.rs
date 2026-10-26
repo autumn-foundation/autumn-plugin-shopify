@@ -15,10 +15,7 @@ fn shop() -> ShopDomain {
 }
 
 fn fast_retry(max_retries: u32) -> RetryPolicy {
-    RetryPolicy {
-        max_retries,
-        max_wait: Duration::from_millis(5),
-    }
+    RetryPolicy::new(max_retries, Duration::from_millis(5))
 }
 
 fn client(stub: &Stub) -> ShopifyClient {
@@ -145,18 +142,56 @@ async fn server_errors_do_not_retry() {
 }
 
 #[tokio::test]
+async fn subscribe_webhook_refuses_compliance_and_bad_topics() {
+    let stub = Stub::start(vec![]).await;
+    let err = client(&stub)
+        .subscribe_webhook(Topic::SHOP_REDACT, "https://a.example.com")
+        .await
+        .expect_err("compliance");
+    assert_eq!(err.kind(), ErrorKind::Config);
+    let err = client(&stub)
+        .subscribe_webhook("Orders", "https://a.example.com")
+        .await
+        .expect_err("malformed");
+    assert_eq!(err.kind(), ErrorKind::InvalidRequest);
+    assert!(stub.requests().is_empty());
+}
+
+#[tokio::test]
+async fn redirects_are_not_followed() {
+    let target = Stub::start(vec![StubResponse::json(200, &json!({"data": {}}))]).await;
+    let stub = Stub::start(vec![
+        StubResponse::text(307, "").header("location", &format!("{}/steal", target.base_url)),
+    ])
+    .await;
+    let err = client(&stub)
+        .graphql("{ ok }", json!({}))
+        .await
+        .expect_err("redirect is an error");
+    assert_eq!(err.kind(), ErrorKind::ShopifyApi);
+    assert!(target.requests().is_empty(), "the token never leaves");
+}
+
+#[tokio::test]
 async fn throttled_graphql_retries_then_succeeds() {
     let stub = Stub::start(vec![
-        StubResponse::json(200, &throttled(100.0, 10.0, 50.0)),
+        StubResponse::json(200, &throttled(1000.0, 0.0, 50.0)),
         StubResponse::json(200, &json!({"data": {"ok": true}})),
     ])
     .await;
+    let started = std::time::Instant::now();
     let data = client(&stub)
         .graphql("query { ok }", json!({}))
         .await
         .expect("retry works");
     assert_eq!(data, json!({"ok": true}));
     assert_eq!(stub.requests().len(), 2);
+    // Shopify asks for 20 s; `max_wait` caps it at 5 ms.
+    assert!(
+        started.elapsed() < Duration::from_secs(2),
+        "{:?}",
+        started.elapsed()
+    );
 }
 
 #[tokio::test]
@@ -224,7 +259,7 @@ async fn query_deserializes_data() {
         .query::<Data>("query { count }", json!({}))
         .await
         .expect_err("wrong shape");
-    assert_eq!(err.kind(), ErrorKind::ShopifyApi);
+    assert_eq!(err.kind(), ErrorKind::UnexpectedResponse);
 }
 
 #[tokio::test]
@@ -234,7 +269,7 @@ async fn missing_data_is_an_error() {
         .graphql("query { x }", json!({}))
         .await
         .expect_err("no data");
-    assert_eq!(err.kind(), ErrorKind::ShopifyApi);
+    assert_eq!(err.kind(), ErrorKind::UnexpectedResponse);
 }
 
 #[tokio::test]
@@ -244,7 +279,7 @@ async fn non_json_success_is_an_error() {
         .graphql("query { x }", json!({}))
         .await
         .expect_err("not json");
-    assert_eq!(err.kind(), ErrorKind::ShopifyApi);
+    assert_eq!(err.kind(), ErrorKind::UnexpectedResponse);
 }
 
 #[tokio::test]
@@ -269,9 +304,8 @@ async fn subscribe_webhook_sends_enum_topic_and_returns_id() {
         }}}),
     )])
     .await;
-    let topic = Topic::parse("orders/create").expect("topic");
     let id = client(&stub)
-        .subscribe_webhook(&topic, "https://app.example.com/shopify/webhooks")
+        .subscribe_webhook("orders/create", "https://app.example.com/shopify/webhooks")
         .await
         .expect("subscribed");
     assert_eq!(id, "gid://shopify/WebhookSubscription/1");
@@ -299,9 +333,8 @@ async fn subscribe_webhook_surfaces_user_errors() {
         }}}),
     )])
     .await;
-    let topic = Topic::parse("orders/create").expect("topic");
     let err = client(&stub)
-        .subscribe_webhook(&topic, "nope")
+        .subscribe_webhook("orders/create", "nope")
         .await
         .expect_err("user error");
     match err {

@@ -66,7 +66,7 @@ impl AsRef<str> for ShopDomain {
     }
 }
 
-/// A webhook topic, for example `orders/create`.
+/// A webhook topic, for example `orders/create` or `customer.tags_added`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Topic(String);
 
@@ -80,7 +80,7 @@ impl Topic {
     /// `shop/redact`: compliance, delete shop data.
     pub const SHOP_REDACT: &'static str = "shop/redact";
     /// The three mandatory compliance topics.
-    pub const COMPLIANCE: [&'static str; 3] = [
+    pub const COMPLIANCE: &'static [&'static str] = &[
         Self::CUSTOMERS_DATA_REQUEST,
         Self::CUSTOMERS_REDACT,
         Self::SHOP_REDACT,
@@ -88,14 +88,14 @@ impl Topic {
 
     /// Parse and validate a topic.
     ///
-    /// A topic has two or more segments joined by `/`. Each segment is one
-    /// or more of `a-z`, `0-9`, `_`.
+    /// A topic has two or more segments joined by `/` or `.`. Each segment
+    /// is one or more of `a-z`, `0-9`, `_`.
     ///
     /// # Errors
     ///
     /// Returns [`Error::InvalidRequest`] when the topic is malformed.
     pub fn parse(value: &str) -> Result<Self> {
-        let segments: Vec<&str> = value.split('/').collect();
+        let segments: Vec<&str> = value.split(['/', '.']).collect();
         let valid = segments.len() >= 2
             && segments.iter().all(|segment| {
                 !segment.is_empty()
@@ -118,10 +118,11 @@ impl Topic {
     }
 
     /// The GraphQL `WebhookSubscriptionTopic` enum value:
-    /// `orders/create` becomes `ORDERS_CREATE`.
+    /// `orders/create` becomes `ORDERS_CREATE`, and `customer.tags_added`
+    /// becomes `CUSTOMER_TAGS_ADDED`.
     #[must_use]
     pub fn graphql_enum(&self) -> String {
-        self.0.replace('/', "_").to_ascii_uppercase()
+        self.0.replace(['/', '.'], "_").to_ascii_uppercase()
     }
 
     /// True for the three mandatory compliance topics.

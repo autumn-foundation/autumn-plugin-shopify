@@ -18,10 +18,11 @@ replicas unless it is shared.
 1. The plugin owns its HMAC code (`hmac`, `sha2`, `base64`). One module
    (`verify`) holds both checks. Both run on raw input, compare in
    constant time, and accept a previous secret during rotation.
-2. The state nonce lives in a browser cookie (`HttpOnly; Secure;
-   SameSite=Lax; Path=/shopify/auth; Max-Age=600`). The callback compares
-   the `state` parameter to the cookie in constant time. The server keeps
-   no OAuth state.
+2. The state nonce and the shop live in a browser cookie
+   (`__Host-shopify_oauth_state={nonce}.{shop}; Path=/; HttpOnly; Secure;
+   SameSite=Lax; Max-Age=600`). The callback compares the `state`
+   parameter to the nonce in constant time and the callback shop to the
+   cookie shop. The server keeps no OAuth state.
 3. Duplicate deliveries and tokens go through traits (`DeliveryStore`,
    `TokenStore`) with in-memory defaults.
 
@@ -31,13 +32,13 @@ replicas unless it is shared.
   Shopify preset can replace `verify::verify_webhook`.
 - OAuth works across replicas with no shared store.
 - Multi-replica apps must supply shared stores. The README says so.
-- A refresh lock is per process. A shared token store must serialize
-  refreshes.
+- A refresh lock is per process. Across replicas, the plugin deletes a
+  refused token only when the store still holds the refused pair.
 
 ## Alternatives
 
 - Autumn `generic` preset: rejected. It expects hex and a `sha256=` prefix.
 - Server-side nonce store: rejected. It needs a shared store.
-- A signed (HMAC) state cookie: not needed. The cookie value only has to
-  equal the `state` parameter; an attacker cannot set a cookie in the
-  victim browser for this host.
+- A signed (HMAC) state cookie: not needed. The `__Host-` prefix stops a
+  sibling subdomain from setting the cookie, and the cookie value only has
+  to equal the `state` parameter and the shop.

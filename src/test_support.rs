@@ -16,6 +16,7 @@ pub struct StubResponse {
     pub status: u16,
     pub headers: Vec<(String, String)>,
     pub body: String,
+    pub delay: std::time::Duration,
 }
 
 impl StubResponse {
@@ -24,6 +25,7 @@ impl StubResponse {
             status,
             headers: vec![("content-type".into(), "application/json".into())],
             body: body.to_string(),
+            delay: std::time::Duration::ZERO,
         }
     }
 
@@ -32,7 +34,13 @@ impl StubResponse {
             status,
             headers: Vec::new(),
             body: body.to_owned(),
+            delay: std::time::Duration::ZERO,
         }
+    }
+
+    pub const fn delayed(mut self, delay: std::time::Duration) -> Self {
+        self.delay = delay;
+        self
     }
 
     pub fn header(mut self, name: &str, value: &str) -> Self {
@@ -131,6 +139,7 @@ async fn handle(
         )
             .into_response();
     };
+    tokio::time::sleep(answer.delay).await;
     let mut response = Response::builder().status(answer.status);
     for (name, value) in &answer.headers {
         response = response.header(name.as_str(), value.as_str());

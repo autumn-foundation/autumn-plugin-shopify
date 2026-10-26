@@ -1,6 +1,6 @@
 # autumn-plugin-shopify
 
-Shopify apps on [Autumn](https://autumn-web.app). One line installs:
+Build Shopify apps on [Autumn](https://autumn-web.app). The plugin adds:
 
 - **Signed webhooks**, routed by topic, with a duplicate guard.
 - **OAuth install** with expiring offline tokens and automatic refresh.
@@ -12,6 +12,9 @@ Shopify apps on [Autumn](https://autumn-web.app). One line installs:
 # Cargo.toml
 [dependencies]
 autumn-plugin-shopify = { git = "https://github.com/autumn-foundation/autumn-plugin-shopify" }
+autumn-web = "0.8"
+serde_json = "1"
+tracing = "0.1"
 ```
 
 ```toml
@@ -60,57 +63,66 @@ In the Shopify Dev Dashboard:
 
 1. Set the redirect URL to `https://<host>/shopify/auth/callback`.
 2. Point webhook subscriptions to `https://<host>/shopify/webhooks`.
-3. Install on a store: open `https://<host>/shopify/auth?shop=<store>.myshopify.com`.
+3. Declare the compliance topics in `shopify.app.toml` (`compliance_topics`).
+4. Install on a store: open `https://<host>/shopify/auth?shop=<store>.myshopify.com`.
 
 See `examples/shop_app.rs` for a full app.
 
-## What the plugin installs
+## What the plugin adds
 
 | Piece | Detail |
 |---|---|
 | Config section | `[shopify]`. Secrets come only from the environment. |
-| `POST /shopify/webhooks` | Checks the HMAC (401), skips duplicates (200), deletes the token on `app/uninstalled` and `shop/redact`, runs the topic handler. |
+| `POST /shopify/webhooks` | Checks the HMAC (401), skips done duplicates (200), answers 409 while the same webhook id still runs, deletes the token on `app/uninstalled` and `shop/redact`, runs the topic handler. |
 | `GET /shopify/auth` | Starts the install: state cookie, then a redirect to Shopify. |
-| `GET /shopify/auth/callback` | Checks HMAC, shop, and state; exchanges the code; checks scopes; stores the token. |
-| `Shopify` extractor | `client()` for a single store, `client_for(&shop)` for installed shops. |
-| Health | A `"shopify"` readiness indicator in single-store mode. |
+| `GET /shopify/auth/callback` | Checks HMAC, shop, and state; exchanges the code; checks scopes; stores the token; runs the install handler. |
+| `Shopify` extractor | `client()` for a single store, `client_for(&shop)` for installed shops, `install_url(&shop)`. |
+| Health | A `"shopify"` indicator in single-store mode, in `/actuator/health` only (not `/ready`). |
 
+The three routes are `#[public]`, so `autumn routes audit` accepts them.
 OAuth routes answer 404 when `app_url` is not set.
 
 ## Configuration
 
-| Key | Default | Meaning |
-|---|---|---|
-| `api_key` | none | App client id. OAuth needs it. |
-| `shop` | none | The shop of a single-store app. |
-| `api_version` | `2026-10` | Admin API version. |
-| `scopes` | `[]` | Scopes OAuth asks for. OAuth needs at least one. |
-| `app_url` | none | Public base URL. Setting it turns OAuth on. |
-| `after_install_path` | `/` | Local path after an install. Gets `?shop=`. |
-| `max_throttle_retries` | `3` | Retries for a throttled Admin API call (0–10). |
+| Key | Environment variable | Default | Meaning |
+|---|---|---|---|
+| `api_key` | `SHOPIFY_API_KEY` | none | App client id. OAuth needs it. |
+| `shop` | `SHOPIFY_SHOP` | none | The shop of a single-store app. |
+| `api_version` | `SHOPIFY_API_VERSION` | `2026-10` | Admin API version. |
+| `scopes` | `SHOPIFY_SCOPES` (comma-separated) | `[]` | Scopes OAuth asks for. OAuth needs at least one. |
+| `app_url` | `SHOPIFY_APP_URL` | none | Public base URL. Setting it turns OAuth on. |
+| `after_install_path` | `SHOPIFY_AFTER_INSTALL_PATH` | `/` | Local path after an install. Gets `shop=`. |
+| `max_throttle_retries` | `SHOPIFY_MAX_THROTTLE_RETRIES` | `3` | Retries for a throttled Admin API call (0–10). |
 
-Environment variables win over the file. `ShopifyPlugin::configure` wins
-over both.
+Precedence: `ShopifyPlugin::configure` > environment > `autumn.toml` >
+defaults. The plugin reads only `autumn.toml`. It does not apply Autumn
+profile layering: use the environment variables for values that change
+per profile.
 
-| Variable | Holds |
+| Secret | Holds |
 |---|---|
 | `SHOPIFY_API_SECRET` | Client secret. Required. |
-| `SHOPIFY_API_SECRET_PREVIOUS` | Old client secret, during rotation. |
+| `SHOPIFY_API_SECRET_PREVIOUS` | Old client secret, during rotation. Webhook and OAuth HMAC checks accept it. |
 | `SHOPIFY_ACCESS_TOKEN` | Fixed Admin API token (single-store apps). |
-| `SHOPIFY_API_KEY`, `SHOPIFY_SHOP`, `SHOPIFY_API_VERSION`, `SHOPIFY_APP_URL`, `SHOPIFY_SCOPES` | The same values as the file keys. |
 
 A secret key (`api_secret`, `access_token`, `*_secret`, `*_token`) in
-`[shopify]` stops the boot.
+`[shopify]` stops the startup.
 
 ## Two app shapes
 
 **Single-store (custom) app.** Set `shop` and `SHOPIFY_ACCESS_TOKEN`. Call
-`shopify.client()` in a route. The `"shopify"` health indicator checks the
-token.
+`shopify.client()` in a route. The startup warns when only one of the two
+is set.
 
 **Public app.** Set `app_url`, `api_key`, and `scopes`. Merchants install
-through `/shopify/auth`. Call `shopify.client_for(&shop).await`. The token
-refreshes 60 seconds before it expires.
+through `/shopify/auth`. Call `shopify.client_for(&shop).await`. When the
+token expires in 60 seconds or less, `client_for` refreshes it first. On
+`NotInstalled` or `Reauthorize`, send the browser to
+`Shopify::install_url(&shop)`.
+
+Run code after each install with `.on_install(handler)`. The handler gets
+the shop, the granted scopes, and a `Shopify` handle. Use it to save a shop
+record or to call `subscribe_webhook`.
 
 ## Calling the Admin API
 
@@ -119,6 +131,7 @@ use autumn_plugin_shopify::Shopify;
 use autumn_web::prelude::*;
 
 #[get("/orders/count")]
+#[secured]
 async fn order_count(shopify: Shopify) -> AutumnResult<String> {
     let client = shopify.client().map_err(|e| e.to_autumn_error())?;
     let data = client
@@ -129,17 +142,20 @@ async fn order_count(shopify: Shopify) -> AutumnResult<String> {
 }
 ```
 
-`query::<T>()` deserializes `data`. `subscribe_webhook(&topic, url)` creates
-a webhook subscription.
+`query::<T>()` deserializes `data`. `subscribe_webhook("orders/create", url)`
+creates a webhook subscription. Compliance topics are not in the GraphQL
+topic list: declare them in `shopify.app.toml`.
 
 The client retries only throttled calls (`THROTTLED` or HTTP 429). Shopify
-does not run a throttled call, so a retry is safe. The client does not retry
-other failures, because a mutation can run twice.
+does not run a throttled call, so a retry is safe. A retry of another
+failure can run a mutation two times, so the client does not do it. The
+client does not follow redirects.
 
 ## Errors
 
-Call `err.to_autumn_error()` to get the right HTTP status. Do not use `?`
-to convert an `Error` into `AutumnError`: Autumn's blanket `From` gives 500.
+Call `err.to_autumn_error()` to get the HTTP status in this table. Do not
+use `?` to change an `Error` into an `AutumnError`: Autumn's blanket `From`
+gives 500.
 
 | Kind | Status |
 |---|---|
@@ -147,23 +163,32 @@ to convert an `Error` into `AutumnError`: Autumn's blanket `From` gives 500.
 | `InvalidRequest`, `Json` | 400 |
 | `StateMismatch`, `ScopeMismatch` | 403 |
 | `OAuthDisabled` | 404 |
+| `InProgress` | 409 |
 | `PayloadTooLarge` | 413 |
-| `Http`, `ShopifyApi`, `GraphQl` | 502 |
+| `Http`, `ShopifyApi`, `GraphQl`, `UnexpectedResponse` | 502 |
 | `Throttled`, `MissingRuntime` | 503 |
 | `Config`, `Store` | 500 |
 
 ## Production notes
 
 - **Respond fast.** Shopify waits 5 seconds. Enqueue a job for slow work.
-  `WebhookContext::state` gives the `AppState`.
+  `WebhookContext::state` gives the `AppState`. When a handler takes
+  longer, the Shopify retry gets 409 and comes back later.
+- **Unsigned headers.** The webhook HMAC covers the body only. The
+  `X-Shopify-*` headers are not signed. Before it deletes a token, the
+  plugin checks that the shop in the body matches the header. Do the same
+  in handlers where a wrong shop can do damage.
+- **Unsigned redirect.** The `shop` value in the redirect after an install
+  is not signed. Do not open a session from it.
 - **Bring a store.** `InMemoryTokenStore` and `InMemoryDeliveryStore` lose
-  data on restart and do not share data across replicas. Implement
+  data on a restart and do not share data across replicas. Implement
   `TokenStore` and `DeliveryStore` on your database or Redis, and install
   them with `.token_store(...)` and `.delivery_store(...)`.
-- **Refresh across replicas.** The plugin runs one refresh per shop in one
-  process. Shopify retires the old refresh token, so two replicas that
-  refresh at the same time can lose a pair. A shared store must serialize
-  refreshes (for example, a row lock).
+- **Refresh across replicas.** One process runs one refresh per shop at a
+  time. If two replicas refresh the same shop at the same time, Shopify
+  refuses the second refresh. The plugin then deletes the token only when
+  the store still holds the old pair, so a pair that the other replica
+  stored stays. To stop the extra refresh, route each shop to one replica.
 - **CSRF.** When `security.csrf.enabled` is on, add `/shopify/webhooks` to
   `security.csrf.exempt_paths`. The plugin logs a warning when it is
   missing.
@@ -172,19 +197,23 @@ to convert an `Error` into `AutumnError`: Autumn's blanket `From` gives 500.
   missing handler when OAuth is on.
 - **Secret rotation.** Put the old secret in `SHOPIFY_API_SECRET_PREVIOUS`
   for at least one hour. Shopify can sign with the old secret for that long.
+  Token calls use the current secret only.
 
 ## Testing your handlers
 
-`sign_webhook(secret, body)` and `sign_query(secret, params)` make requests
-the plugin accepts. `ShopifyConfig::from_sources(toml, env_lookup)` builds a
-config without the process environment. `ShopifyPlugin::admin_base_url`
-points Admin API and OAuth calls at a local stub.
+- `sign_webhook(secret, body)` and `sign_query(secret, params)` make
+  requests the plugin accepts.
+- `ShopifyConfig::from_sources(toml, lookup)` builds a config without the
+  process environment.
+- `ShopifyPlugin::admin_base_url("http://127.0.0.1:<port>")` sends Admin
+  API and OAuth calls to a local stub. Only loopback hosts are allowed.
+- `WebhookContext::new(...)` builds a context to call a handler directly.
 
 ## Crate layout
 
 | Module | Purpose |
 |---|---|
-| `config` | `[shopify]` config, `SHOPIFY_*` env, builder closures |
+| `config` | `[shopify]` config, `SHOPIFY_*` variables, builder closures |
 | `types` | `ShopDomain`, `Topic`, `ApiVersion` |
 | `verify` | Webhook and OAuth HMAC checks |
 | `webhooks` | The webhook route, extractor, and topic registry |
@@ -192,8 +221,8 @@ points Admin API and OAuth calls at a local stub.
 | `oauth` | Install and callback routes, token exchange, refresh |
 | `tokens` | Token storage |
 | `client` | Admin GraphQL client |
-| `health` | Readiness check |
-| `plugin` | `ShopifyPlugin`, `ShopifyRuntime`, `Shopify` |
+| `health` | Health check |
+| `plugin` | `ShopifyPlugin`, `ShopifyRuntime`, `Shopify`, `InstallContext` |
 | `error` | `Error`, `ErrorKind`, HTTP status mapping |
 
 ## Not in this release
@@ -201,6 +230,7 @@ points Admin API and OAuth calls at a local stub.
 - Embedded-app session tokens (App Bridge) and token exchange.
 - App proxy signature checks.
 - Online (per-user) tokens.
+- Autumn profile layering for `[shopify]`.
 
 ## Docs and comments
 

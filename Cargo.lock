@@ -159,6 +159,7 @@ dependencies = [
  "futures",
  "hex",
  "hmac",
+ "http-body-util",
  "proptest",
  "reqwest",
  "serde",

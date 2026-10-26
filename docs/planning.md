@@ -259,3 +259,56 @@ Each "how to break it" maps to a guard and an AC.
 - Embedded-app session tokens and token exchange.
 - App proxy signature verification.
 - Shared (Redis/DB) duplicate guard and token store examples.
+
+## Review round 1 (2026-10-26)
+
+Four reviewers (security, correctness, Shopify spec, API/docs) read the
+code. Their confirmed findings added these ACs.
+
+- **AC-43** The handler runs in its own task. A panic or a dropped request
+  releases the claim (`complete` on success, `release` otherwise).
+- **AC-44** A claim has three states. A repeated id that still runs gets
+  409; an in-flight claim expires after a 5 min lease.
+- **AC-45** Before it deletes a token, the plugin checks the shop in the
+  body (`myshopify_domain` / `shop_domain`) against the header (400 on a
+  mismatch).
+- **AC-46** A late `app/uninstalled` or `shop/redact` keeps the token of a
+  later install (`installed_at` > `X-Shopify-Triggered-At`).
+- **AC-47** Only a refresh 401 that is not `invalid_client` deletes the
+  token, and only when the store still holds the refused pair.
+- **AC-48** A refresh runs in its own task. A cancelled caller does not
+  lose the rotated pair. Uninstall and install writes take the same
+  per-shop lock, so a refresh cannot bring back a deleted token.
+- **AC-49** A failed refresh returns the old token while it is valid, with
+  a 10 s back-off.
+- **AC-50** The OAuth query HMAC follows the shopify.dev rule (drop
+  `hmac`, sort, join decoded `k=v` with `&`). The install request HMAC is
+  checked when present.
+- **AC-51** The state cookie is `__Host-` and binds the shop. A repeated
+  cookie is refused.
+- **AC-52** Plugin routes are `#[public]` and pass `autumn routes audit`
+  (classification `Public`).
+- **AC-53** The health indicator is health-only (not readiness) and does
+  not retry.
+- **AC-54** `admin_base_url` accepts only loopback hosts. The HTTP client
+  follows no redirects.
+- **AC-55** Topics with dots (`customer.tags_added`) parse.
+  `subscribe_webhook` refuses compliance topics.
+- **AC-56** `on_install` hook and `Shopify::install_url`.
+- **AC-57** `after_install_path` with a query joins with `&`; a fragment is
+  refused. `SHOPIFY_AFTER_INSTALL_PATH` and `SHOPIFY_MAX_THROTTLE_RETRIES`
+  exist.
+- **AC-58** Public structs and enums that can grow are `#[non_exhaustive]`
+  with constructors (`RetryPolicy::new`, `ShopToken::with_refresh`,
+  `WebhookContext::new`).
+
+Rejected or deferred, with the reason:
+
+- Dedupe on a body hash (header-swap replay): two subscriptions can send
+  equal bodies. AC-45 covers the damaging case. Documented as "unsigned
+  headers".
+- Try the previous secret on a refresh `invalid_client`: the token is kept
+  (AC-47), so a rotation error is not destructive. Deferred.
+- Wrap `reqwest::Error` in `Error::Http`: the sibling plugins expose it
+  too. Deferred to a breaking release.
+- Autumn profile layering: documented as a gap.

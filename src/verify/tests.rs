@@ -103,13 +103,14 @@ fn query_message_sorts_and_drops_hmac() {
 }
 
 #[test]
-fn query_message_escapes_separators() {
+fn query_message_keeps_decoded_values_and_other_params() {
     let params = vec![
-        ("a=b".to_owned(), "1&2".to_owned()),
-        ("c".to_owned(), "50%".to_owned()),
-        ("signature".to_owned(), "dropped".to_owned()),
+        ("host".to_owned(), "YWRtaW4=".to_owned()),
+        ("signature".to_owned(), "kept".to_owned()),
+        ("hmac".to_owned(), "dropped".to_owned()),
+        ("a".to_owned(), "x y".to_owned()),
     ];
-    assert_eq!(query_message(&params), "a%3Db=1%262&c=50%25");
+    assert_eq!(query_message(&params), "a=x y&host=YWRtaW4=&signature=kept");
 }
 
 #[test]
@@ -161,7 +162,7 @@ proptest! {
     #[test]
     fn signed_queries_always_verify(pairs in proptest::collection::vec(("[a-z_]{1,8}", "[ -~]{0,16}"), 0..6)) {
         let mut params: Vec<(String, String)> = pairs;
-        params.retain(|(k, _)| k != "hmac" && k != "signature");
+        params.retain(|(k, _)| k != "hmac");
         let hmac = sign_query("hush", &params);
         params.push(("hmac".into(), hmac));
         prop_assert!(verify_query(&secrets(), &params).is_ok());

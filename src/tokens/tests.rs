@@ -9,13 +9,11 @@ fn shop(name: &str) -> ShopDomain {
 }
 
 fn expiring(expires_at: i64, refresh_expires_at: i64) -> ShopToken {
-    ShopToken {
-        access_token: "shpat_a".into(),
-        scope: "read_orders,write_products".into(),
-        expires_at: Some(expires_at),
-        refresh_token: Some("shprt_r".into()),
-        refresh_token_expires_at: Some(refresh_expires_at),
-    }
+    ShopToken::non_expiring("shpat_a", "read_orders,write_products").with_refresh(
+        expires_at,
+        "shprt_r",
+        Some(refresh_expires_at),
+    )
 }
 
 #[test]
@@ -47,6 +45,22 @@ fn can_refresh_checks_refresh_expiry() {
 }
 
 #[test]
+fn is_expired_uses_the_expiry_time() {
+    let token = expiring(1_000, 10_000);
+    assert!(!token.is_expired(999));
+    assert!(token.is_expired(1_000));
+    assert!(!ShopToken::non_expiring("t", "s").is_expired(i64::MAX));
+}
+
+#[test]
+fn old_records_without_installed_at_still_parse() {
+    let json = r#"{"access_token":"t","scope":"s","expires_at":null,"refresh_token":null,"refresh_token_expires_at":null}"#;
+    let token: ShopToken = serde_json::from_str(json).expect("parses");
+    assert_eq!(token.installed_at, None);
+    assert_eq!(token.with_installed_at(5).installed_at, Some(5));
+}
+
+#[test]
 fn scopes_split_on_commas() {
     let token = ShopToken::non_expiring("t", "read_orders, write_products,,");
     assert_eq!(token.scopes(), vec!["read_orders", "write_products"]);
@@ -72,7 +86,7 @@ async fn in_memory_store_puts_gets_and_deletes() {
     let store = InMemoryTokenStore::new();
     let a = shop("a");
     let b = shop("b");
-    assert!(store.is_empty());
+    assert!(store.is_empty().expect("is_empty"));
     assert!(store.get(&a).await.expect("get").is_none());
 
     store
@@ -87,7 +101,7 @@ async fn in_memory_store_puts_gets_and_deletes() {
         .put(&b, ShopToken::non_expiring("three", "read_orders"))
         .await
         .expect("put");
-    assert_eq!(store.len(), 2);
+    assert_eq!(store.len().expect("len"), 2);
     assert_eq!(
         store
             .get(&a)
@@ -101,5 +115,5 @@ async fn in_memory_store_puts_gets_and_deletes() {
     store.delete(&a).await.expect("delete");
     store.delete(&a).await.expect("delete twice is fine");
     assert!(store.get(&a).await.expect("get").is_none());
-    assert_eq!(store.len(), 1);
+    assert_eq!(store.len().expect("len"), 1);
 }

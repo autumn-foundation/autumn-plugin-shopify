@@ -1,10 +1,10 @@
-//! `autumn-plugin-shopify`: Shopify apps on Autumn.
+//! `autumn-plugin-shopify`: build Shopify apps on Autumn.
 //!
 //! - Signed webhooks, routed by topic, with a duplicate guard.
 //! - OAuth install with expiring offline tokens and refresh.
 //! - An Admin GraphQL client that retries throttled calls.
 //!
-//! ```ignore
+//! ```no_run
 //! use autumn_plugin_shopify::{ShopifyPlugin, WebhookContext};
 //! use autumn_web::prelude::*;
 //!
@@ -58,10 +58,10 @@ mod test_support;
 
 pub use client::{RetryPolicy, ShopInfo, ShopifyClient};
 pub use config::ShopifyConfig;
-pub use delivery::{DeliveryStore, InMemoryDeliveryStore};
+pub use delivery::{Claim, DeliveryStore, InMemoryDeliveryStore};
 pub use error::{Error, ErrorKind, Result};
 pub use health::ShopifyHealth;
-pub use plugin::{Shopify, ShopifyPlugin, ShopifyRuntime};
+pub use plugin::{InstallContext, Shopify, ShopifyPlugin, ShopifyRuntime};
 pub use tokens::{InMemoryTokenStore, ShopToken, TokenStore};
 pub use types::{ApiVersion, DEFAULT_API_VERSION, ShopDomain, Topic};
 pub use verify::{SecretSet, sign_query, sign_webhook, verify_query, verify_webhook};

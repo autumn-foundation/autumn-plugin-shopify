@@ -257,3 +257,29 @@ fn shop_domain_is_parsed() {
     let shop = valid_oauth().shop_domain().expect("valid").expect("set");
     assert_eq!(shop.as_str(), "my-store.myshopify.com");
 }
+
+#[test]
+fn env_sets_after_install_path_and_retries() {
+    let config = ShopifyConfig::from_sources(
+        Some(FULL),
+        env(&[
+            ("SHOPIFY_AFTER_INSTALL_PATH", "/app?tab=home"),
+            ("SHOPIFY_MAX_THROTTLE_RETRIES", " 2 "),
+        ]),
+    )
+    .expect("loads");
+    assert_eq!(config.after_install_path, "/app?tab=home");
+    assert_eq!(config.max_throttle_retries, 2);
+    let err = ShopifyConfig::from_sources(None, env(&[("SHOPIFY_MAX_THROTTLE_RETRIES", "many")]))
+        .expect_err("not a number");
+    assert_eq!(err.kind(), ErrorKind::Config);
+}
+
+#[test]
+fn after_install_path_allows_a_query_but_not_a_fragment() {
+    let mut config = valid_oauth();
+    config.after_install_path = "/app?tab=home".into();
+    config.validate().expect("query is fine");
+    config.after_install_path = "/app#top".into();
+    config.validate().expect_err("fragment");
+}

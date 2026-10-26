@@ -7,34 +7,42 @@ All notable changes to this project are documented here. The format follows
 
 ### Added
 
-- `ShopifyPlugin`: one-line install for `autumn-web` 0.8. It declares the
-  `[shopify]` section, mounts routes under `/shopify`, declares them for
-  route audit, and declares its `autumn-web` contract.
+- `ShopifyPlugin`: one-line setup for `autumn-web` 0.8. It declares the
+  `[shopify]` section, mounts three `#[public]` routes under `/shopify`,
+  declares them for `autumn routes audit`, and declares its `autumn-web`
+  contract.
 - `POST /shopify/webhooks`: base64 HMAC-SHA256 check on the raw body (401 on
-  every topic), 5 MiB limit (413), duplicate guard on
-  `X-Shopify-Webhook-Id`, token cleanup on `app/uninstalled` and
-  `shop/redact`, and topic dispatch. A failed handler gives 500 and frees
-  the duplicate claim, so the Shopify retry runs.
-- `VerifiedWebhook` extractor and `webhooks::process` for custom routes.
+  every topic) and a 5 MiB limit (413). A duplicate guard on
+  `X-Shopify-Webhook-Id` has three states: a done id gets 200, an id that
+  still runs gets 409, a new id runs the handler. The handler runs in its
+  own task: a failure, a panic, or a dropped request releases the claim,
+  so that the Shopify retry runs.
+- Token cleanup on `app/uninstalled` and `shop/redact`. The shop in the
+  body must match the header. A late event does not delete the token of a
+  later install.
+- `VerifiedWebhook` extractor, `webhooks::process`, and
+  `WebhookContext::{new, client, json}` for custom routes and handler tests.
 - OAuth install: `GET /shopify/auth` and `GET /shopify/auth/callback`.
-  Stateless state cookie, query HMAC check, anchored shop check, expiring
-  offline tokens (`expiring=1`), scope check (`write_x` covers `read_x`).
+  Stateless `__Host-` state cookie bound to the shop, query HMAC check (on
+  the install request too, when Shopify signs it), anchored shop check,
+  expiring offline tokens (`expiring=1`), scope check (`write_x` covers
+  `read_x`), and `ShopifyPlugin::on_install`.
 - Token refresh in `client_for`: 60 s margin, one refresh per shop at a
-  time, refused refresh deletes the token (`Reauthorize`).
+  time, in its own task. Only a 401 (not `invalid_client`) deletes the
+  token, and only when the store still holds the refused pair. A failed
+  refresh uses the old token while it is valid, with a 10 s back-off.
 - `TokenStore` and `DeliveryStore` traits with in-memory defaults.
 - `ShopifyClient`: Admin GraphQL, typed `query::<T>()`, `shop_info()`,
-  `subscribe_webhook()`. Retries only `THROTTLED` and HTTP 429.
-- `Shopify` extractor, `"shopify"` readiness indicator (single-store mode).
-- Config: `[shopify]` file keys, `SHOPIFY_*` env, `.configure()` closures.
-  Secrets only from env; a secret key in the file stops the boot. Secret
-  rotation with `SHOPIFY_API_SECRET_PREVIOUS`.
-- Startup warnings: missing compliance handlers (OAuth on), CSRF on without
-  a `/shopify/webhooks` exemption.
+  `subscribe_webhook()`. Retries only `THROTTLED` and HTTP 429. Follows no
+  redirects.
+- `Shopify` extractor with `client()`, `client_for()`, `install_url()`.
+  A `"shopify"` health indicator (health only, no retries) in single-store
+  mode.
+- Config: `[shopify]` keys, `SHOPIFY_*` variables, `.configure()` closures.
+  Secrets only from the environment; a secret key in the file stops the
+  startup. Secret rotation with `SHOPIFY_API_SECRET_PREVIOUS`.
+- Startup warnings: missing compliance handlers (OAuth on), half-set
+  single-store mode, CSRF on without a `/shopify/webhooks` exemption.
 - Test helpers: `sign_webhook`, `sign_query`, `ShopifyConfig::from_sources`,
-  `ShopifyPlugin::admin_base_url`.
+  `ShopifyPlugin::admin_base_url` (loopback hosts only).
 - Example: `shop_app`.
-
-### Known gaps
-
-- No embedded-app session tokens, app proxy checks, or online tokens.
-- In-process refresh lock only; see the README for multi-replica apps.

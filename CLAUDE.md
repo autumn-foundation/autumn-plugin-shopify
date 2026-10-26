@@ -3,6 +3,11 @@
 ## Commands
 
 ```sh
+export PATH="$HOME/.cargo/bin:$PATH"
+export CARGO_BUILD_JOBS=2
+export CARGO_TARGET_DIR=~/workspace/autumn-arena/target   # shared with sibling arena builds; never cargo clean
+export TMPDIR=~/workspace/.tmp-cargo                      # /tmp is a 512MB tmpfs
+
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
@@ -10,7 +15,8 @@ cargo +1.88 clippy --locked --all-targets --all-features -- -D warnings   # MSRV
 cargo llvm-cov --summary-only                                            # keep >= 85 % lines
 ```
 
-All gates must pass before a push. `Cargo.lock` is committed.
+Run the gates one at a time; the box is shared with other builds. All
+gates must pass before a push. `Cargo.lock` is committed.
 
 ## Architecture
 
@@ -26,13 +32,14 @@ All gates must pass before a push. `Cargo.lock` is committed.
 | `webhooks` | Route, `VerifiedWebhook`, `WebhookRegistry`, `process` | `verify`, `plugin` |
 | `oauth` | Install and callback routes, code exchange, refresh | `verify`, `tokens`, `plugin` |
 | `health` | `ShopifyHealth` | `client`, `autumn_web::actuator` |
-| `plugin` | `ShopifyPlugin`, `ShopifyRuntime`, `Shopify`, `mount`, warnings | all above |
+| `plugin` | `ShopifyPlugin`, `ShopifyRuntime`, `Keeper` (per-shop token lock), `Shopify`, `InstallContext`, `mount`, warnings | all above |
 
 Webhook flow: Shopify `POST`s `/shopify/webhooks` → `VerifiedWebhook`
 checks the HMAC on the raw bytes (401) and reads headers (400) →
-`process` claims the webhook id (duplicate: 200) → token cleanup for
-`app/uninstalled` / `shop/redact` → topic handler → 200, or 500 with the
-claim released.
+`process` claims the webhook id (done: 200, in flight: 409) → a spawned
+task runs token cleanup for `app/uninstalled` / `shop/redact` (body shop
+must match) and the topic handler → `complete` on success, `release` on
+error, panic, or a dropped request.
 
 ## Rules
 
@@ -51,8 +58,12 @@ claim released.
 - Retry only throttled Admin API calls. A mutation must not run twice.
 - Time and randomness come from `AppState::clock()` and
   `AppState::entropy()`. Tests use `FixedClock` and `SeededEntropy`.
-- `Plugin::build` has no side effects. IO happens in the `on_startup` hook
-  (`ShopifyPlugin::start`).
+- `Plugin::build` has no side effects. IO happens in the `on_startup` hook:
+  it reads the config file, then `ShopifyPlugin::start` builds the runtime.
+- Every token write and delete goes through `Keeper` and its per-shop lock.
+  Never call `TokenStore::put` or `delete` directly in plugin code.
+- Plugin routes carry `#[public]`; `mount` uses `collect_route_infos`, so
+  `autumn routes audit` sees a classification. Test it.
 - Unit tests live in `src/<module>/tests.rs`. Network tests use
   `test_support::Stub` (local axum server). No test needs Shopify.
 - Docs and comments in ASD-STE100 style: short sentences, active voice,
@@ -61,3 +72,6 @@ claim released.
   requirement in `Cargo.toml`.
 - Ground Shopify facts on shopify.dev and record them in
   `docs/planning.md`. Never from memory.
+- Ground Autumn API questions on the docs MCP
+  (`~/workspace/skills/autumn-mcp/bin/mcp.py`) or the vendored
+  `autumn-web-0.8.0` sources. Never from memory.

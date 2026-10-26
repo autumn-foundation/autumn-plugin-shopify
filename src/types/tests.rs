@@ -85,6 +85,8 @@ fn topic_parses_and_maps_to_graphql_enum() {
     assert_eq!(topic.graphql_enum(), "ORDERS_CREATE");
     let topic = Topic::parse("customers/data_request").expect("valid topic");
     assert_eq!(topic.graphql_enum(), "CUSTOMERS_DATA_REQUEST");
+    let topic = Topic::parse("customer.tags_added").expect("dotted topic");
+    assert_eq!(topic.graphql_enum(), "CUSTOMER_TAGS_ADDED");
     let topic = Topic::parse("app_subscriptions/approaching_capped_amount").expect("valid");
     assert_eq!(
         topic.graphql_enum(),
@@ -104,6 +106,9 @@ fn topic_rejects_malformed_values() {
         "orders/create ",
         "orders/cre-ate",
         "orders\\create",
+        "orders.",
+        ".orders",
+        "orders/.create",
     ] {
         Topic::parse(bad).expect_err(bad);
     }

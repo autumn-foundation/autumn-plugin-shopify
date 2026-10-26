@@ -136,8 +136,11 @@ enum Scopes {
 impl ShopifyConfig {
     /// Read `autumn.toml` and the process environment. Does not validate.
     ///
-    /// The file is searched in `AUTUMN_MANIFEST_DIR`, then in the current
-    /// directory. A missing file or section is fine.
+    /// The loader reads the file from `AUTUMN_MANIFEST_DIR` first, then from
+    /// the current directory. A missing file or section is not an error.
+    /// The loader reads only `autumn.toml`: it does not apply Autumn profile
+    /// layering. Use the `SHOPIFY_*` variables for values that change per
+    /// profile.
     ///
     /// # Errors
     ///
@@ -145,14 +148,23 @@ impl ShopifyConfig {
     /// section has a secret or an unknown key, or an env value is bad.
     pub fn load() -> Result<Self> {
         let path = config_file_path();
-        let text = std::fs::read_to_string(&path).ok();
+        let text = match std::fs::read_to_string(&path) {
+            Ok(text) => Some(text),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => None,
+            Err(err) => {
+                return Err(Error::Config(format!(
+                    "cannot read {}: {err}",
+                    path.display()
+                )));
+            }
+        };
         Self::from_sources(text.as_deref(), |name| std::env::var(name).ok())
     }
 
-    /// Build the config from a TOML document and an env lookup. Does not
-    /// validate.
+    /// Build the config from a TOML document and an environment lookup.
+    /// Does not validate.
     ///
-    /// This is the test seam: pass a closure, not the process env.
+    /// Use it in tests. Pass a closure, not the process environment.
     ///
     /// # Errors
     ///
@@ -165,7 +177,7 @@ impl ShopifyConfig {
             Some(text) => Self::from_toml_str(text)?,
             None => Self::default(),
         };
-        config.apply_env_with(env);
+        config.apply_env_with(env)?;
         Ok(config)
     }
 
@@ -224,10 +236,24 @@ impl ShopifyConfig {
     /// Apply `SHOPIFY_*` variables from `get`.
     ///
     /// Reads `SHOPIFY_API_KEY`, `SHOPIFY_SHOP`, `SHOPIFY_API_VERSION`,
-    /// `SHOPIFY_APP_URL`, `SHOPIFY_SCOPES` (comma-separated), and the three
-    /// secret variables. Blank values count as unset.
-    pub fn apply_env_with(&mut self, get: impl Fn(&str) -> Option<String>) {
+    /// `SHOPIFY_APP_URL`, `SHOPIFY_SCOPES` (comma-separated),
+    /// `SHOPIFY_AFTER_INSTALL_PATH`, `SHOPIFY_MAX_THROTTLE_RETRIES`, and the
+    /// three secret variables. Blank values count as unset.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Config`] when `SHOPIFY_MAX_THROTTLE_RETRIES` is not
+    /// a number.
+    pub fn apply_env_with(&mut self, get: impl Fn(&str) -> Option<String>) -> Result<()> {
         let get = |name: &str| get(name).filter(|value| !value.trim().is_empty());
+        if let Some(value) = get("SHOPIFY_AFTER_INSTALL_PATH") {
+            self.after_install_path = value;
+        }
+        if let Some(value) = get("SHOPIFY_MAX_THROTTLE_RETRIES") {
+            self.max_throttle_retries = value.trim().parse().map_err(|_| {
+                Error::Config("SHOPIFY_MAX_THROTTLE_RETRIES must be a number".to_owned())
+            })?;
+        }
         if let Some(value) = get("SHOPIFY_API_KEY") {
             self.api_key = Some(value);
         }
@@ -252,6 +278,7 @@ impl ShopifyConfig {
         if let Some(value) = get(ACCESS_TOKEN_ENV) {
             self.access_token = Some(value);
         }
+        Ok(())
     }
 
     /// Check that the config is complete and well-formed.
@@ -367,7 +394,7 @@ fn is_secret_key(key: &str) -> bool {
     SECRET_KEYS.contains(&key.as_str()) || key.ends_with("_secret") || key.ends_with("_token")
 }
 
-/// Split a comma-separated list; drop blanks.
+/// Split a comma-separated list. Drop the blank items.
 fn split_csv(text: &str) -> Vec<String> {
     text.split(',')
         .map(str::trim)
@@ -410,6 +437,7 @@ fn validate_local_path(path: &str) -> Result<()> {
     let local = path.starts_with('/')
         && !path.starts_with("//")
         && !path.contains('\\')
+        && !path.contains('#')
         && !path.chars().any(char::is_control);
     if local {
         Ok(())
