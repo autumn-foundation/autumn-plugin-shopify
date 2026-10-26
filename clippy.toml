@@ -1,0 +1,4 @@
+# clippy config for autumn-plugin-shopify
+
+# Cognitive complexity is fine here; the OAuth callback reads linearly.
+cognitive-complexity-threshold = 30
