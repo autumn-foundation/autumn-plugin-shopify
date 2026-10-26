@@ -25,7 +25,7 @@ Checked against shopify.dev and the vendored `autumn-web-0.8.0` sources.
 | OAuth callback HMAC: drop `hmac`, sort params, join `k=v` with `&`, hex HMAC-SHA256, constant-time compare. | shopify.dev, "Authorization code grant" |
 | Shop regex: `^[a-zA-Z0-9][a-zA-Z0-9\-]*\.myshopify\.com$`, anchored at both ends. | same |
 | Token exchange: form POST `https://{shop}/admin/oauth/access_token` with `client_id`, `client_secret`, `code`, `expiring=1`. Response: `access_token`, `scope`, `expires_in`, `refresh_token`, `refresh_token_expires_in`. | same |
-| Refresh: same URL, `grant_type=refresh_token`. Rotate the pair. A `401` means "clear the pair and re-authorize". | same |
+| Refresh: same URL, `grant_type=refresh_token`. Rotate the pair. A `401` is terminal ("clear the pair and re-authorize"). Bad client credentials get `403`; `429` and `5xx` are temporary. The presented refresh token "stays usable until your app uses the one Shopify issued in its place". | shopify.dev, "Authenticate standalone apps" |
 | A `write_*` scope includes its `read_*` scope. Merchants can change scopes: verify them. | same |
 | API versions: quarterly (`01`, `04`, `07`, `10`). Latest stable: `2026-10`. Unsupported versions fall forward. | shopify.dev, "API versioning" |
 | GraphQL cost: `extensions.cost.throttleStatus { maximumAvailable, currentlyAvailable, restoreRate }`. Backoff of 1 s is the recommendation. Throttled requests do not run. | shopify.dev, "Rate limits" |
@@ -79,7 +79,7 @@ Each "how to break it" maps to a guard and an AC.
 | Refresh token expired; app loops on errors. | Refresh 401: delete the pair, return `Reauthorize`. | AC-31 |
 | Retry a failed mutation on 5xx and charge twice. | Retry only throttles (not run by Shopify). | AC-24 |
 | Retry forever while throttled. | `max_throttle_retries` and a wait cap. | AC-24 |
-| Secret in `autumn.toml` gets committed. | Any secret key in `[shopify]` fails config loading. | AC-02 |
+| Secret in `autumn.toml` gets committed. | Any secret key in `[shopify]` stops the startup. | AC-02 |
 | Token in logs through `Debug`. | Redacting `Debug` on config, client, token, runtime. | AC-03, AC-27 |
 | Huge body exhausts memory. | 5 MiB limit, 413. | AC-11 |
 | Rotate the client secret; webhooks fail for up to 1 h. | Verify with current and previous secret. | AC-09 |
@@ -139,7 +139,7 @@ Each "how to break it" maps to a guard and an AC.
   `app_url`, `after_install_path` (default `/`), `max_throttle_retries`
   (default 3). Unknown keys fail.
 - **AC-02** A secret key (`api_secret`, `client_secret`, `access_token`,
-  `secret`, `token`) in `[shopify]` fails config loading.
+  `secret`, `token`) in `[shopify]` stops the startup.
 - **AC-03** Secrets come only from `SHOPIFY_API_SECRET`,
   `SHOPIFY_API_SECRET_PREVIOUS`, `SHOPIFY_ACCESS_TOKEN`. `Debug` redacts them.
 - **AC-04** Precedence: builder `.configure()` > `SHOPIFY_*` env
@@ -173,7 +173,7 @@ Each "how to break it" maps to a guard and an AC.
 - **AC-14** Handler error → 500 and the duplicate claim is released.
 - **AC-15** A repeated webhook id → 200, handler does not run again.
 - **AC-16** Unknown topic → 200 and a warning; no handler runs.
-- **AC-17** A duplicate or invalid topic registration fails startup.
+- **AC-17** A duplicate or invalid topic registration stops the startup.
 - **AC-18** `app/uninstalled` and `shop/redact` delete the shop's token
   before the app handler runs.
 - **AC-19** With OAuth on, startup warns for each compliance topic that has
@@ -312,3 +312,28 @@ Rejected or deferred, with the reason:
 - Wrap `reqwest::Error` in `Error::Http`: the sibling plugins expose it
   too. Deferred to a breaking release.
 - Autumn profile layering: documented as a gap.
+
+## Review round 2 (2026-10-26)
+
+Two reviewers (code; docs, API, and spec) read the round 1 code.
+
+- **AC-59** `complete` and `release` name the claim by its time. A late
+  owner cannot free or finish a newer claim of the same id.
+- **AC-60** The lock table keeps one entry per shop. Pruning let an
+  uninstall and a new install hold two locks at one time.
+- **AC-61** Every refresh 401 is terminal (shopify.dev). A 403 keeps the
+  token. A refused refresh uses a fresh pair that another replica stored.
+- **AC-62** The client secret and the fixed token have no public getter
+  (`SecretSet::current`, `ShopifyConfig::secrets`, `access_token` are
+  crate-private).
+- **AC-63** `InstallContext::new` for handler tests.
+- **AC-64** Docs match the code: a dropped request does not stop the
+  handler, a failure answers with the error status, the health indicator
+  is health-only.
+
+Corrections to earlier ACs: AC-28 (cookie) is superseded by AC-51
+(`__Host-`, `Path=/`). AC-05 also accepts `[::1]`. AC-02 also refuses
+`api_secret_previous` and any `*_secret` / `*_token` key. AC-35 is
+superseded by AC-53 (health only). The install-request HMAC check (AC-50)
+is extra: shopify.dev does not ask for it. It runs only when Shopify sends
+an `hmac`.

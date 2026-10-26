@@ -43,7 +43,7 @@ pub enum ErrorKind {
     ScopeMismatch,
     /// The shop has no stored access token.
     NotInstalled,
-    /// The token cannot refresh. The merchant must install the app again.
+    /// The plugin cannot refresh the token. The merchant must install the app again.
     Reauthorize,
     /// OAuth is off (`[shopify] app_url` is not set).
     OAuthDisabled,
@@ -127,7 +127,7 @@ pub enum Error {
     #[error("shop {0} has no stored token; install the app")]
     NotInstalled(String),
 
-    /// The token cannot refresh. The merchant must install the app again.
+    /// The plugin cannot refresh the token. The merchant must install the app again.
     #[error("shop {0} must install the app again")]
     Reauthorize(String),
 

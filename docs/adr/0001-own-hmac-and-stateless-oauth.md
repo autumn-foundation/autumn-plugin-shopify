@@ -32,8 +32,9 @@ replicas unless it is shared.
   Shopify preset can replace `verify::verify_webhook`.
 - OAuth works across replicas with no shared store.
 - Multi-replica apps must supply shared stores. The README says so.
-- A refresh lock is per process. Across replicas, the plugin deletes a
-  refused token only when the store still holds the refused pair.
+- A refresh lock is per process. Across replicas, a refused refresh uses a
+  fresh pair that another replica stored, and the plugin deletes a token
+  only when the store still holds the refused pair.
 
 ## Alternatives
 

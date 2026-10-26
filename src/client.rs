@@ -7,7 +7,7 @@
 //! Shopify does not run a throttled request, so a retry is safe. The
 //! client retries a `THROTTLED` GraphQL error and an HTTP 429, up to
 //! [`RetryPolicy::max_retries`]. It does not retry other failures: a
-//! mutation is not always idempotent.
+//! second run of a mutation can change data two times.
 
 use std::time::Duration;
 
@@ -128,7 +128,8 @@ impl ShopifyClient {
     }
 
     /// Send requests to `base_url` instead of `https://{shop}`. Use it for
-    /// a local stub in tests.
+    /// a local stub in tests. The requests carry the access token, so use
+    /// only a host you trust.
     #[must_use]
     pub fn with_base_url(mut self, base_url: impl Into<String>) -> Self {
         base_url
@@ -172,8 +173,9 @@ impl ShopifyClient {
     ///
     /// Returns [`Error::Http`] on a transport failure,
     /// [`Error::ShopifyApi`] on a non-success status, [`Error::GraphQl`]
-    /// when the response has errors, and [`Error::Throttled`] when the
-    /// retries run out.
+    /// when the response has errors, [`Error::UnexpectedResponse`] when the
+    /// body has no `data`, and [`Error::Throttled`] when the retries run
+    /// out.
     pub async fn graphql(
         &self,
         query: &str,
@@ -214,8 +216,8 @@ impl ShopifyClient {
     ///
     /// # Errors
     ///
-    /// See [`graphql`](Self::graphql). Also returns [`Error::ShopifyApi`]
-    /// when `data` does not match `T`.
+    /// See [`graphql`](Self::graphql). Also returns
+    /// [`Error::UnexpectedResponse`] when `data` does not match `T`.
     pub async fn query<T: DeserializeOwned>(
         &self,
         query: &str,

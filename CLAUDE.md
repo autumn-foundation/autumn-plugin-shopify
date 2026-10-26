@@ -15,8 +15,8 @@ cargo +1.88 clippy --locked --all-targets --all-features -- -D warnings   # MSRV
 cargo llvm-cov --summary-only                                            # keep >= 85 % lines
 ```
 
-Run the gates one at a time; the box is shared with other builds. All
-gates must pass before a push. `Cargo.lock` is committed.
+Run the gates one at a time. Other builds use this machine. All gates must
+pass before a push. `Cargo.lock` is committed.
 
 ## Architecture
 
@@ -38,8 +38,9 @@ Webhook flow: Shopify `POST`s `/shopify/webhooks` → `VerifiedWebhook`
 checks the HMAC on the raw bytes (401) and reads headers (400) →
 `process` claims the webhook id (done: 200, in flight: 409) → a spawned
 task runs token cleanup for `app/uninstalled` / `shop/redact` (body shop
-must match) and the topic handler → `complete` on success, `release` on
-error, panic, or a dropped request.
+must match) and the topic handler → `complete` on success, `release` on an
+error or a panic. A dropped request does not stop the task. Both calls
+name the claim by its time.
 
 ## Rules
 
@@ -61,7 +62,8 @@ error, panic, or a dropped request.
 - `Plugin::build` has no side effects. IO happens in the `on_startup` hook:
   it reads the config file, then `ShopifyPlugin::start` builds the runtime.
 - Every token write and delete goes through `Keeper` and its per-shop lock.
-  Never call `TokenStore::put` or `delete` directly in plugin code.
+  Never call `TokenStore::put` or `delete` directly in plugin code. Never
+  remove an entry from the lock table: one shop keeps one lock.
 - Plugin routes carry `#[public]`; `mount` uses `collect_route_infos`, so
   `autumn routes audit` sees a classification. Test it.
 - Unit tests live in `src/<module>/tests.rs`. Network tests use

@@ -8,9 +8,9 @@
 //!   key. The hex digest travels in the `hmac` parameter. See
 //!   [`verify_query`].
 //!
-//! Both checks fail closed and compare in constant time. A
-//! [`SecretSet`] holds the current secret and, during rotation, the
-//! previous one.
+//! Both checks refuse the request when a value is missing or malformed, and
+//! compare in constant time. A [`SecretSet`] holds the current secret and,
+//! during rotation, the previous one.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -64,7 +64,7 @@ impl SecretSet {
 
     /// The current secret. Never log it.
     #[must_use]
-    pub fn current(&self) -> &str {
+    pub(crate) fn current(&self) -> &str {
         &self.current
     }
 }

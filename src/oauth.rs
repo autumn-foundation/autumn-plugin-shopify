@@ -12,8 +12,8 @@
 //! The `__Host-` state cookie binds the flow to the browser and to the
 //! shop. The flow keeps no server state, so it works across replicas.
 //!
-//! The `shop` value in the final redirect is not signed. The landing route
-//! must not trust it to open a session.
+//! The plugin does not sign the `shop` value in the final redirect. The
+//! landing route must not trust it to open a session.
 //!
 //! Both routes answer 404 when OAuth is off.
 
@@ -146,12 +146,6 @@ struct TokenResponse {
     refresh_token_expires_in: Option<i64>,
 }
 
-/// An OAuth error body, for example `{"error": "invalid_client"}`.
-#[derive(Debug, Deserialize)]
-struct OAuthError {
-    error: Option<String>,
-}
-
 /// Exchange an authorization code for an expiring offline token.
 ///
 /// # Errors
@@ -185,8 +179,9 @@ pub(crate) async fn exchange_code(
 
 /// Refresh an expiring token.
 ///
-/// Only a 401 that is not `invalid_client` means "the refresh token is
-/// dead". Any other failure keeps the stored token.
+/// A 401 means "the refresh token is dead" (shopify.dev). Any other
+/// failure keeps the stored token: Shopify answers 403 for bad client
+/// credentials, and a 429, a 5xx, or a timeout is temporary.
 ///
 /// # Errors
 ///
@@ -213,18 +208,10 @@ pub(crate) async fn refresh_token(
     if status.is_success() {
         return read_token(response, now).await;
     }
-    let err = crate::client::api_error(response).await;
-    if status == StatusCode::UNAUTHORIZED
-        && let Error::ShopifyApi { body, .. } = &err
-    {
-        let code = serde_json::from_str::<OAuthError>(body)
-            .ok()
-            .and_then(|e| e.error);
-        if code.as_deref() != Some("invalid_client") {
-            return Err(Error::Reauthorize(shop.to_string()));
-        }
+    if status == StatusCode::UNAUTHORIZED {
+        return Err(Error::Reauthorize(shop.to_string()));
     }
-    Err(err)
+    Err(crate::client::api_error(response).await)
 }
 
 /// POST a form to `{shop}/admin/oauth/access_token`.

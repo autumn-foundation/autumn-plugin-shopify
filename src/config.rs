@@ -330,7 +330,7 @@ impl ShopifyConfig {
     /// # Errors
     ///
     /// Returns [`Error::Config`] when `SHOPIFY_API_SECRET` is not set.
-    pub fn secrets(&self) -> Result<SecretSet> {
+    pub(crate) fn secrets(&self) -> Result<SecretSet> {
         let current = self.api_secret.clone().ok_or_else(|| {
             Error::Config(format!(
                 "the client secret is missing; set the {API_SECRET_ENV} environment variable"
@@ -341,7 +341,7 @@ impl ShopifyConfig {
 
     /// The fixed access token from `SHOPIFY_ACCESS_TOKEN`, if set.
     #[must_use]
-    pub fn access_token(&self) -> Option<&str> {
+    pub(crate) fn access_token(&self) -> Option<&str> {
         self.access_token.as_deref()
     }
 

@@ -81,7 +81,7 @@ async fn installed(ctx: InstallContext) -> AutumnResult<()> {
     Ok(())
 }
 
-/// The page after an install. The `shop` value is not signed: do not open
+/// The page after an install. Nothing signs the `shop` value. Do not open
 /// a session from it.
 #[get("/")]
 #[public]

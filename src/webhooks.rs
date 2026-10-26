@@ -5,11 +5,13 @@
 //! failure, on every topic) and reads the `X-Shopify-*` headers. The route
 //! then:
 //!
-//! 1. Claims the webhook id. A duplicate gets 200 and no handler runs.
-//! 2. Deletes the shop token on `app/uninstalled` and `shop/redact`.
+//! 1. Claims the webhook id. A done id gets 200 and no handler runs. An id
+//!    that still runs gets 409, so that Shopify tries again later.
+//! 2. Deletes the shop token on `app/uninstalled` and `shop/redact`, when
+//!    the shop in the body matches the header.
 //! 3. Runs the handler for the topic. No handler: 200 and a warning.
-//! 4. Answers 200 on success. On failure it releases the claim and answers
-//!    500, so that Shopify retries.
+//! 4. Answers 200 on success. On a failure it releases the claim and
+//!    answers with the error status (never 2xx), so that Shopify retries.
 //!
 //! Shopify waits 5 seconds. Do slow work in a background job.
 
@@ -52,9 +54,9 @@ pub const TRIGGERED_AT_HEADER: &str = "x-shopify-triggered-at";
 /// Use it on a custom route. HMAC failures give 401 before the handler
 /// runs. `Debug` leaves out the body.
 ///
-/// The HMAC covers the body only. The `X-Shopify-*` headers (topic, shop,
-/// ids, times) are not signed. Read the shop from the body when a wrong
-/// shop can do damage.
+/// The HMAC covers the body only. Shopify does not sign the `X-Shopify-*`
+/// headers (topic, shop, ids, times). Read the shop from the body when a
+/// wrong shop can do damage.
 #[non_exhaustive]
 pub struct VerifiedWebhook {
     /// The topic, for example `orders/create`.
@@ -156,8 +158,8 @@ impl FromRequest<AppState> for VerifiedWebhook {
 
 /// What a webhook handler receives.
 ///
-/// The HMAC covers `body` only. The header values (`topic`, `shop`, the
-/// ids, `triggered_at`) are not signed.
+/// The HMAC covers `body` only. Shopify does not sign the header values
+/// (`topic`, `shop`, the ids, `triggered_at`).
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct WebhookContext {
@@ -333,16 +335,16 @@ pub enum WebhookOutcome {
 /// The plugin route calls this. Call it from a custom route that uses
 /// [`VerifiedWebhook`].
 ///
-/// The handler runs in its own task. A panic in the handler, or a request
-/// that the server drops (timeout, closed connection), does not keep the
-/// claim: the task releases it, so that the next Shopify retry runs the
-/// handler again.
+/// The handler runs in its own task. A dropped request (timeout, closed
+/// connection) does not stop the handler. The handler result sets the
+/// claim: success marks it done, and a failure or a panic releases it, so
+/// that the next Shopify retry runs the handler again.
 ///
 /// # Errors
 ///
-/// Returns [`Error::InProgress`] (409) when another delivery of the same
-/// webhook id still runs, the handler error, a panic as 500, or a store
-/// error.
+/// Returns [`Error::InProgress`] (409) when another delivery of the id
+/// runs. Returns the handler error when the handler fails. Returns 500
+/// when the handler panics or a store fails.
 pub async fn process(state: &AppState, webhook: VerifiedWebhook) -> AutumnResult<WebhookOutcome> {
     let runtime = Arc::clone(&webhook.runtime);
     let now = state.clock().now().timestamp();
@@ -380,9 +382,9 @@ pub async fn process(state: &AppState, webhook: VerifiedWebhook) -> AutumnResult
                 ))
             });
         let settled = if outcome.is_ok() {
-            deliveries.complete(&webhook_id).await
+            deliveries.complete(&webhook_id, now).await
         } else {
-            deliveries.release(&webhook_id).await
+            deliveries.release(&webhook_id, now).await
         };
         if let Err(err) = settled {
             tracing::error!(error = %err, webhook_id = %webhook_id, "shopify webhook claim update failed");
@@ -445,7 +447,7 @@ async fn dispatch(state: &AppState, webhook: VerifiedWebhook) -> AutumnResult<We
 /// For a token-deleting topic, check that the shop in the signed body is
 /// the shop in the (unsigned) header.
 ///
-/// `app/uninstalled` carries `myshopify_domain`; `shop/redact` carries
+/// `app/uninstalled` carries `myshopify_domain`. `shop/redact` carries
 /// `shop_domain`. A body without the field passes.
 fn check_body_shop(webhook: &VerifiedWebhook) -> Result<()> {
     let field = if webhook.topic.as_str() == Topic::SHOP_REDACT {
@@ -481,7 +483,7 @@ fn is_length_limit(err: &(dyn std::error::Error + 'static)) -> bool {
     false
 }
 
-/// A header value as `&str`; `None` when missing, blank, or not ASCII.
+/// The header value. `None` when it is missing, blank, or not ASCII.
 fn header<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
         .get(name)?

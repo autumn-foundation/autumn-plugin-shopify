@@ -612,9 +612,10 @@ async fn a_refresh_400_keeps_the_token() {
 }
 
 #[tokio::test]
-async fn a_refresh_invalid_client_keeps_the_token() {
+async fn a_refresh_403_keeps_the_token() {
+    // shopify.dev: bad client credentials get a 403, not a 401.
     let stub = Stub::start(vec![StubResponse::json(
-        401,
+        403,
         &json!({"error": "invalid_client"}),
     )])
     .await;
@@ -703,7 +704,7 @@ impl TokenStore for SwapStore {
 }
 
 #[tokio::test]
-async fn a_refused_refresh_does_not_delete_a_pair_another_replica_stored() {
+async fn a_refused_refresh_uses_and_keeps_a_pair_another_replica_stored() {
     let stub = Stub::start(vec![StubResponse::json(
         401,
         &json!({"error": "invalid_request"}),
@@ -724,8 +725,12 @@ async fn a_refused_refresh_does_not_delete_a_pair_another_replica_stored() {
         .token_store(store.clone())
         .build_runtime(config(Some(OAUTH_TOML), &[]))
         .expect("runtime");
-    let err = runtime.client_for(&shop(), NOW).await.expect_err("refused");
-    assert_eq!(err.kind(), ErrorKind::Reauthorize);
+    // The refused caller uses the fresh pair of the other replica.
+    let client = runtime
+        .client_for(&shop(), NOW)
+        .await
+        .expect("replica pair");
+    assert_eq!(client.shop(), &shop());
     assert_eq!(
         store.later.lock().expect("lock").clone(),
         Some(replica_pair),
@@ -889,4 +894,35 @@ fn install_url_points_at_the_install_route() {
         Shopify::install_url(&shop()),
         "/shopify/auth?shop=my-store.myshopify.com"
     );
+}
+
+#[tokio::test]
+async fn an_uninstall_keeps_the_per_shop_lock_entry() {
+    let runtime = ShopifyPlugin::new()
+        .build_runtime(config(Some(OAUTH_TOML), &[]))
+        .expect("runtime");
+    let before = runtime.keeper().lock_for(&shop()).expect("lock");
+    runtime
+        .keeper()
+        .delete_for_event(&shop(), None)
+        .await
+        .expect("delete");
+    let after = runtime.keeper().lock_for(&shop()).expect("lock");
+    assert!(
+        Arc::ptr_eq(&before, &after),
+        "one shop keeps one lock, so an uninstall and an install never overlap"
+    );
+}
+
+#[test]
+fn install_context_new_fills_the_state_from_the_handle() {
+    let state = state(Some(
+        ShopifyPlugin::new()
+            .build_runtime(config(Some(OAUTH_TOML), &[]))
+            .expect("runtime"),
+    ));
+    let shopify = Shopify::from_state(&state).expect("handle");
+    let ctx = InstallContext::new(shop(), "read_orders", shopify);
+    assert_eq!(ctx.scope, "read_orders");
+    assert!(format!("{ctx:?}").contains("my-store.myshopify.com"));
 }

@@ -11,8 +11,9 @@
 //! | [`Claim::Done`] | 200. A handler already succeeded. |
 //!
 //! After success the route calls [`DeliveryStore::complete`]. After a
-//! failure, a panic, or a cancelled request it calls
-//! [`DeliveryStore::release`], so that the next Shopify retry runs again.
+//! failure or a panic it calls [`DeliveryStore::release`], so that the next
+//! Shopify retry runs again. Both calls name the claim by its time, so a
+//! late owner cannot change a newer claim of the same id.
 //!
 //! [`InMemoryDeliveryStore`] keeps claims for a time window and drops the
 //! oldest claim when it is full. An in-flight claim expires after a lease.
@@ -49,10 +50,12 @@ pub enum Claim {
 pub trait DeliveryStore: Send + Sync + 'static {
     /// Claim `webhook_id` at `now` (Unix seconds).
     fn claim<'a>(&'a self, webhook_id: &'a str, now: i64) -> StoreFuture<'a, Claim>;
-    /// Mark a claim as done after the handler succeeds.
-    fn complete<'a>(&'a self, webhook_id: &'a str) -> StoreFuture<'a, ()>;
-    /// Release a claim, so that a retry of the same id runs again.
-    fn release<'a>(&'a self, webhook_id: &'a str) -> StoreFuture<'a, ()>;
+    /// Mark the claim made at `claimed_at` as done. Do nothing when the
+    /// store holds a newer claim of the id.
+    fn complete<'a>(&'a self, webhook_id: &'a str, claimed_at: i64) -> StoreFuture<'a, ()>;
+    /// Release the claim made at `claimed_at`, so that a retry runs again.
+    /// Do nothing when the store holds a newer claim of the id.
+    fn release<'a>(&'a self, webhook_id: &'a str, claimed_at: i64) -> StoreFuture<'a, ()>;
 }
 
 /// A process-local [`DeliveryStore`] with a time window, a lease, and a
@@ -167,19 +170,27 @@ impl DeliveryStore for InMemoryDeliveryStore {
         Box::pin(async move { result })
     }
 
-    fn complete<'a>(&'a self, webhook_id: &'a str) -> StoreFuture<'a, ()> {
+    fn complete<'a>(&'a self, webhook_id: &'a str, claimed_at: i64) -> StoreFuture<'a, ()> {
         let result = self.lock().map(|mut claims| {
-            if let Some(entry) = claims.by_id.get_mut(webhook_id) {
+            if let Some(entry) = claims.by_id.get_mut(webhook_id)
+                && entry.at == claimed_at
+            {
                 entry.done = true;
             }
         });
         Box::pin(async move { result })
     }
 
-    fn release<'a>(&'a self, webhook_id: &'a str) -> StoreFuture<'a, ()> {
+    fn release<'a>(&'a self, webhook_id: &'a str, claimed_at: i64) -> StoreFuture<'a, ()> {
         let result = self.lock().map(|mut claims| {
-            // The `order` entry stays. `pop_oldest` skips stale entries.
-            claims.by_id.remove(webhook_id);
+            if claims
+                .by_id
+                .get(webhook_id)
+                .is_some_and(|entry| entry.at == claimed_at)
+            {
+                // The `order` entry stays. `pop_oldest` skips stale entries.
+                claims.by_id.remove(webhook_id);
+            }
         });
         Box::pin(async move { result })
     }

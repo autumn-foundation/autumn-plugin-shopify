@@ -185,19 +185,21 @@ gives 500.
   `TokenStore` and `DeliveryStore` on your database or Redis, and install
   them with `.token_store(...)` and `.delivery_store(...)`.
 - **Refresh across replicas.** One process runs one refresh per shop at a
-  time. If two replicas refresh the same shop at the same time, Shopify
-  refuses the second refresh. The plugin then deletes the token only when
-  the store still holds the old pair, so a pair that the other replica
-  stored stays. To stop the extra refresh, route each shop to one replica.
+  time. Shopify keeps a presented refresh token usable until the app uses
+  the new one, so a second replica that refreshes at the same time
+  usually gets a pair too. When Shopify refuses a refresh (401), the plugin
+  uses a fresh pair that another replica stored. It deletes the token only
+  when the store still holds the refused pair.
 - **CSRF.** When `security.csrf.enabled` is on, add `/shopify/webhooks` to
-  `security.csrf.exempt_paths`. The plugin logs a warning when it is
+  `security.csrf.exempt_paths`. The plugin logs a warning when the path is
   missing.
 - **Compliance.** Public apps must handle `customers/data_request`,
   `customers/redact`, and `shop/redact`. The plugin logs a warning for each
   missing handler when OAuth is on.
 - **Secret rotation.** Put the old secret in `SHOPIFY_API_SECRET_PREVIOUS`
   for at least one hour. Shopify can sign with the old secret for that long.
-  Token calls use the current secret only.
+  Token calls use the current secret only. A refresh with a wrong secret
+  gets 403, and the plugin keeps the token.
 
 ## Testing your handlers
 
@@ -207,7 +209,12 @@ gives 500.
   process environment.
 - `ShopifyPlugin::admin_base_url("http://127.0.0.1:<port>")` sends Admin
   API and OAuth calls to a local stub. Only loopback hosts are allowed.
-- `WebhookContext::new(...)` builds a context to call a handler directly.
+- `WebhookContext::new(...)` and `InstallContext::new(...)` build contexts
+  to call handlers directly. Get the `Shopify` handle with
+  `Shopify::from_state(&state)` after you put a runtime from
+  `ShopifyPlugin::build_runtime` in the state (`state.insert_extension`).
+- `ShopToken` derives `Serialize` with both tokens in clear text. Encrypt
+  it at rest in your store, and never log it.
 
 ## Crate layout
 

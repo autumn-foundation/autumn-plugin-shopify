@@ -21,9 +21,9 @@ async fn a_new_id_is_fresh_and_a_running_one_is_in_flight() {
 async fn a_completed_id_is_done() {
     let store = InMemoryDeliveryStore::default();
     store.claim("w1", 100).await.expect("claim");
-    store.complete("w1").await.expect("complete");
+    store.complete("w1", 100).await.expect("complete");
     store
-        .complete("missing")
+        .complete("missing", 100)
         .await
         .expect("complete of a missing id is fine");
     assert_eq!(store.claim("w1", 101).await.expect("claim"), Claim::Done);
@@ -33,8 +33,11 @@ async fn a_completed_id_is_done() {
 async fn release_lets_a_retry_claim_again() {
     let store = InMemoryDeliveryStore::default();
     assert_eq!(store.claim("w1", 100).await.expect("claim"), Claim::Fresh);
-    store.release("w1").await.expect("release");
-    store.release("w1").await.expect("release twice is fine");
+    store.release("w1", 100).await.expect("release");
+    store
+        .release("w1", 100)
+        .await
+        .expect("release twice is fine");
     assert_eq!(store.claim("w1", 200).await.expect("claim"), Claim::Fresh);
 }
 
@@ -51,10 +54,27 @@ async fn an_expired_lease_lets_a_retry_claim_again() {
 }
 
 #[tokio::test]
+async fn a_stale_owner_cannot_change_a_newer_claim() {
+    let store = InMemoryDeliveryStore::default().with_lease(60);
+    // Owner A claims at 0 and hangs. Owner B claims after the lease.
+    assert_eq!(store.claim("w1", 0).await.expect("claim"), Claim::Fresh);
+    assert_eq!(store.claim("w1", 61).await.expect("claim"), Claim::Fresh);
+    // A fails late: its release must not free the claim of B.
+    store.release("w1", 0).await.expect("release");
+    assert_eq!(store.claim("w1", 62).await.expect("claim"), Claim::InFlight);
+    // A succeeds late: its complete must not mark the claim of B as done.
+    store.complete("w1", 0).await.expect("complete");
+    assert_eq!(store.claim("w1", 63).await.expect("claim"), Claim::InFlight);
+    // B settles its own claim.
+    store.complete("w1", 61).await.expect("complete");
+    assert_eq!(store.claim("w1", 64).await.expect("claim"), Claim::Done);
+}
+
+#[tokio::test]
 async fn claims_expire_after_the_window() {
     let store = InMemoryDeliveryStore::new(60, 100);
     store.claim("w1", 1_000).await.expect("claim");
-    store.complete("w1").await.expect("complete");
+    store.complete("w1", 1_000).await.expect("complete");
     assert_eq!(store.claim("w1", 1_059).await.expect("claim"), Claim::Done);
     assert_eq!(store.claim("w1", 1_060).await.expect("claim"), Claim::Fresh);
 }
@@ -91,7 +111,7 @@ async fn released_ids_do_not_grow_the_queue_without_limit() {
     let store = InMemoryDeliveryStore::new(1_000_000, 4);
     for now in 0..1_000 {
         store.claim("retry", now).await.expect("claim");
-        store.release("retry").await.expect("release");
+        store.release("retry", now).await.expect("release");
     }
     let queue = store.inner.lock().expect("lock").order.len();
     assert!(queue <= 8, "queue has {queue} entries");
@@ -107,8 +127,8 @@ proptest! {
                 let now = i64::try_from(now).expect("small");
                 let _ = store.claim(id, now).await;
                 match now % 3 {
-                    0 => { let _ = store.release(id).await; }
-                    1 => { let _ = store.complete(id).await; }
+                    0 => { let _ = store.release(id, now).await; }
+                    1 => { let _ = store.complete(id, now).await; }
                     _ => {}
                 }
             }
@@ -123,7 +143,7 @@ proptest! {
         let (first, second) = runtime.block_on(async {
             let first = store.claim(&id, now).await;
             if done {
-                store.complete(&id).await.expect("complete");
+                store.complete(&id, now).await.expect("complete");
             }
             (first, store.claim(&id, now + 1).await)
         });

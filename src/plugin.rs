@@ -83,6 +83,19 @@ pub struct InstallContext {
     pub shopify: Shopify,
 }
 
+impl InstallContext {
+    /// Make a context, for example to test an install handler.
+    #[must_use]
+    pub fn new(shop: ShopDomain, scope: impl Into<String>, shopify: Shopify) -> Self {
+        Self {
+            shop,
+            scope: scope.into(),
+            state: shopify.state().clone(),
+            shopify,
+        }
+    }
+}
+
 impl std::fmt::Debug for InstallContext {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("InstallContext")
@@ -190,8 +203,16 @@ impl Keeper {
                 Ok(fresh)
             }
             Err(Error::Reauthorize(_)) => {
+                // Another replica or a new install can have stored a new
+                // pair. Use it when it is fresh; else delete the dead pair.
+                if let Some(current) = self.tokens.get(shop).await?
+                    && current != token
+                    && !current.needs_refresh(now, REFRESH_MARGIN_SECS)
+                {
+                    return Ok(current);
+                }
                 self.delete_if_unchanged(shop, &token).await?;
-                tracing::warn!(shop = %shop, "shopify refused the refresh token; the shop must install again");
+                tracing::warn!(shop = %shop, "shopify refused the refresh token. The shop must install the app again");
                 Err(Error::Reauthorize(shop.to_string()))
             }
             Err(err) => {
@@ -229,6 +250,10 @@ impl Keeper {
     }
 
     /// Delete the token of `shop` for an event at `event_at` (Unix seconds).
+    #[allow(
+        clippy::significant_drop_tightening,
+        reason = "the per-shop lock must cover the read and the delete"
+    )]
     ///
     /// A token from an install after the event stays. Returns `true` when
     /// the token is gone.
@@ -237,8 +262,10 @@ impl Keeper {
         shop: &ShopDomain,
         event_at: Option<i64>,
     ) -> Result<bool> {
+        // The lock entry stays in the table. A removed entry lets a waiter
+        // on the old lock and a new install on a new lock run at one time.
         let lock = self.lock_for(shop)?;
-        let guard = lock.lock().await;
+        let _guard = lock.lock().await;
         let current = self.tokens.get(shop).await?;
         let newer = matches!(
             (current.as_ref().and_then(|t| t.installed_at), event_at),
@@ -248,8 +275,6 @@ impl Keeper {
             return Ok(false);
         }
         self.tokens.delete(shop).await?;
-        drop(guard);
-        self.lock_table()?.remove(shop);
         Ok(true)
     }
 }
@@ -301,7 +326,10 @@ impl ShopifyRuntime {
         &self.registry
     }
 
-    /// The token store.
+    /// The token store, to read tokens.
+    ///
+    /// Do not write or delete tokens through it: the plugin serializes
+    /// writes per shop, and a direct write can race a refresh.
     #[must_use]
     pub fn token_store(&self) -> &Arc<dyn TokenStore> {
         &self.keeper.tokens
@@ -550,8 +578,8 @@ impl ShopifyPlugin {
     }
 
     /// Run `handler` after each install, when the token is stored. Use it
-    /// to save a shop record or to subscribe webhooks. An error gives 500;
-    /// the token stays stored.
+    /// to save a shop record or to subscribe webhooks. An error gives 500.
+    /// The token stays in the store.
     #[must_use]
     pub fn on_install<F, Fut>(mut self, handler: F) -> Self
     where

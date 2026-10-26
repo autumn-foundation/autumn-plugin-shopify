@@ -15,8 +15,9 @@ All notable changes to this project are documented here. The format follows
   every topic) and a 5 MiB limit (413). A duplicate guard on
   `X-Shopify-Webhook-Id` has three states: a done id gets 200, an id that
   still runs gets 409, a new id runs the handler. The handler runs in its
-  own task: a failure, a panic, or a dropped request releases the claim,
-  so that the Shopify retry runs.
+  own task, so a dropped request does not stop it. Success marks the claim
+  done. A failure or a panic releases it, so that the Shopify retry runs.
+  A late owner cannot change a newer claim of the same id.
 - Token cleanup on `app/uninstalled` and `shop/redact`. The shop in the
   body must match the header. A late event does not delete the token of a
   later install.
@@ -28,9 +29,10 @@ All notable changes to this project are documented here. The format follows
   expiring offline tokens (`expiring=1`), scope check (`write_x` covers
   `read_x`), and `ShopifyPlugin::on_install`.
 - Token refresh in `client_for`: 60 s margin, one refresh per shop at a
-  time, in its own task. Only a 401 (not `invalid_client`) deletes the
-  token, and only when the store still holds the refused pair. A failed
-  refresh uses the old token while it is valid, with a 10 s back-off.
+  time, in its own task. A 401 deletes the token, but only when the store
+  still holds the refused pair. When another replica stored a fresh pair,
+  the caller uses it. Other failures keep the token. A failed refresh uses
+  the old token while it is valid, with a 10 s back-off.
 - `TokenStore` and `DeliveryStore` traits with in-memory defaults.
 - `ShopifyClient`: Admin GraphQL, typed `query::<T>()`, `shop_info()`,
   `subscribe_webhook()`. Retries only `THROTTLED` and HTTP 429. Follows no

@@ -35,7 +35,7 @@
 //! | [`oauth`] | Install and callback routes, token exchange, refresh |
 //! | [`tokens`] | Token storage |
 //! | [`client`] | Admin GraphQL client |
-//! | [`health`] | Readiness check |
+//! | [`health`] | Health check |
 //! | [`plugin`] | [`ShopifyPlugin`], [`ShopifyRuntime`], [`Shopify`] |
 //! | [`error`] | [`Error`], [`ErrorKind`], HTTP status mapping |
 

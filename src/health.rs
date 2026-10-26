@@ -1,9 +1,10 @@
-//! Readiness check for single-store apps.
+//! Health check for single-store apps.
 //!
 //! [`ShopifyHealth`] implements Autumn's [`HealthIndicator`]. It calls
 //! [`ShopifyClient::shop_info`] and reports `Up` with the shop name, or
-//! `Down` with the error. The plugin registers it as `"shopify"` when
-//! `shop` and `SHOPIFY_ACCESS_TOKEN` are set.
+//! `Down` with the error. The plugin registers it as `"shopify"` in the
+//! health-only group (`/actuator/health`, not `/ready`) when `shop` and
+//! `SHOPIFY_ACCESS_TOKEN` are set.
 
 use std::collections::HashMap;
 use std::sync::Arc;
