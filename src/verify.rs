@@ -26,7 +26,12 @@ pub const HMAC_HEADER: &str = "x-shopify-hmac-sha256";
 
 /// The app client secret, plus the previous one during rotation.
 ///
-/// `Debug` redacts both values.
+/// `Debug` redacts both values. App code cannot read them back:
+///
+/// ```compile_fail
+/// let set = autumn_plugin_shopify::SecretSet::new("s", None).unwrap();
+/// let _ = set.current();
+/// ```
 #[derive(Clone)]
 pub struct SecretSet {
     current: String,

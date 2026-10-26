@@ -55,7 +55,17 @@ const SECRET_KEYS: [&str; 6] = [
 
 /// Configuration for the Shopify plugin.
 ///
-/// `Debug` redacts the secrets.
+/// `Debug` redacts the secrets. App code cannot read them:
+///
+/// ```compile_fail
+/// let config = autumn_plugin_shopify::ShopifyConfig::default();
+/// let _ = config.secrets();
+/// ```
+///
+/// ```compile_fail
+/// let config = autumn_plugin_shopify::ShopifyConfig::default();
+/// let _ = config.access_token();
+/// ```
 #[derive(Clone)]
 pub struct ShopifyConfig {
     /// The app client id (`api_key`). OAuth needs it.

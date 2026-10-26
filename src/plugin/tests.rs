@@ -926,3 +926,37 @@ fn install_context_new_fills_the_state_from_the_handle() {
     assert_eq!(ctx.scope, "read_orders");
     assert!(format!("{ctx:?}").contains("my-store.myshopify.com"));
 }
+
+#[tokio::test]
+async fn the_health_indicator_is_health_only_and_does_not_retry() {
+    use autumn_web::actuator::{HealthStatus, IndicatorGroup};
+    let stub = Stub::start(vec![
+        StubResponse::text(429, "slow down").header("retry-after", "0.001"),
+    ])
+    .await;
+    let state = state(None);
+    ShopifyPlugin::new()
+        .admin_base_url(stub.base_url.clone())
+        .start(
+            &state,
+            config(
+                None,
+                &[
+                    ("SHOPIFY_SHOP", SHOP),
+                    ("SHOPIFY_ACCESS_TOKEN", "shpat_fixed"),
+                ],
+            ),
+        )
+        .expect("starts");
+    let results = state.health_indicator_registry().run_all().await;
+    let shopify = results
+        .iter()
+        .find(|result| result.name == "shopify")
+        .expect("indicator registered");
+    assert!(
+        matches!(shopify.group, IndicatorGroup::HealthOnly),
+        "not in /ready"
+    );
+    assert_eq!(shopify.output.status, HealthStatus::Down);
+    assert_eq!(stub.requests().len(), 1, "a probe does not retry");
+}

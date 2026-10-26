@@ -668,3 +668,41 @@ async fn webhook_context_new_and_client_work_in_handler_tests() {
     let err = ctx.client().await.expect_err("not installed");
     assert_eq!(err.kind(), ErrorKind::NotInstalled);
 }
+
+/// A custom route: the app mounts its own path with the extractor.
+#[autumn_web::post("/hooks/shopify")]
+async fn custom_route(
+    autumn_web::State(state): autumn_web::State<AppState>,
+    webhook: VerifiedWebhook,
+) -> autumn_web::AutumnResult<String> {
+    let outcome = process(&state, webhook).await?;
+    Ok(format!("{outcome:?}"))
+}
+
+#[tokio::test]
+async fn the_extractor_works_on_a_custom_route() {
+    let seen = Seen::default();
+    let state = setup(&plugin_with(&seen));
+    let mut router = axum::Router::new();
+    for route in autumn_web::routes![custom_route] {
+        router = router.route(route.path, route.handler);
+    }
+    let client = autumn_web::test::TestApp::from_router(router.with_state(state.clone()), state);
+    let send = |hmac: String| {
+        client
+            .post("/hooks/shopify")
+            .header(TOPIC_HEADER, "orders/create")
+            .header(WEBHOOK_ID_HEADER, "w-custom")
+            .header(SHOP_HEADER, SHOP)
+            .header(HMAC_HEADER, &hmac)
+            .body(BODY.as_bytes().to_vec())
+            .send()
+    };
+    send(sign_webhook("wrong", BODY.as_bytes()))
+        .await
+        .assert_status(401);
+    let response = send(sign_webhook(SECRET, BODY.as_bytes())).await;
+    response.assert_status(200);
+    assert_eq!(response.text(), "Handled");
+    assert_eq!(seen.lock().expect("lock").len(), 1);
+}
