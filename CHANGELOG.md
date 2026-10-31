@@ -5,6 +5,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-31
+
 ### Changed
 
 - Support `autumn-web` 0.9. The plugin now needs `autumn-web` 0.9.
