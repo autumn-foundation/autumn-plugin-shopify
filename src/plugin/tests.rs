@@ -88,7 +88,7 @@ fn contract_is_compatible_with_linked_autumn_web() {
         evaluate(&contract, AUTUMN_WEB_VERSION),
         ContractVerdict::Compatible
     );
-    for version in ["0.7.0", "0.9.0", "1.0.0"] {
+    for version in ["0.8.0", "0.10.0", "1.0.0"] {
         assert!(matches!(
             evaluate(&contract, version),
             ContractVerdict::Incompatible(_)
@@ -228,7 +228,7 @@ fn runtime_debug_hides_secrets() {
     assert!(!debug.contains("shpat_fixed"), "{debug}");
     assert!(!debug.contains(SECRET), "{debug}");
     assert_eq!(runtime.secrets().current(), SECRET);
-    assert!(runtime.registry().topics().is_empty());
+    assert_eq!(runtime.registry().topics(), [] as [&str; 0]);
     let claim = futures::executor::block_on(runtime.delivery_store().claim("x", 0));
     assert_eq!(claim.expect("claim"), crate::delivery::Claim::Fresh);
 }
@@ -556,7 +556,10 @@ fn warnings_name_missing_compliance_handlers_when_oauth_is_on() {
     let runtime = ShopifyPlugin::new()
         .build_runtime(config(None, &[]))
         .expect("runtime");
-    assert!(startup_warnings(&runtime, &autumn_web::config::AutumnConfig::default()).is_empty());
+    assert_eq!(
+        startup_warnings(&runtime, &autumn_web::config::AutumnConfig::default()),
+        [] as [std::string::String; 0]
+    );
 }
 
 #[test]
@@ -571,9 +574,15 @@ fn warnings_name_the_csrf_exemption() {
     assert!(warnings[0].contains("/shopify/webhooks"));
 
     app_config.security.csrf.exempt_paths = vec!["/shopify/".into()];
-    assert!(startup_warnings(&runtime, &app_config).is_empty());
+    assert_eq!(
+        startup_warnings(&runtime, &app_config),
+        [] as [std::string::String; 0]
+    );
     app_config.security.csrf.exempt_paths = vec!["/shopify/webhooks".into()];
-    assert!(startup_warnings(&runtime, &app_config).is_empty());
+    assert_eq!(
+        startup_warnings(&runtime, &app_config),
+        [] as [std::string::String; 0]
+    );
     app_config.security.csrf.exempt_paths = vec!["/shop".into()];
     assert_eq!(startup_warnings(&runtime, &app_config).len(), 1);
 }

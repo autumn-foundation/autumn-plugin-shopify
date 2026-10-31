@@ -502,18 +502,18 @@ fn missing_scopes_lets_write_cover_read() {
         "write_products".to_owned(),
         "read_customers".to_owned(),
     ];
-    assert!(
+    assert_eq!(
         missing_scopes(
             &requested,
             &["write_orders", "write_products", "read_customers"]
-        )
-        .is_empty()
+        ),
+        [] as [std::string::String; 0]
     );
     assert_eq!(
         missing_scopes(&requested, &["read_products", "read_orders"]),
         vec!["write_products", "read_customers"]
     );
-    assert!(missing_scopes(&[], &[]).is_empty());
+    assert_eq!(missing_scopes(&[], &[]), [] as [std::string::String; 0]);
 }
 
 #[test]
@@ -551,7 +551,10 @@ fn parse_query_decodes_and_rejects_repeats() {
             ("c".to_owned(), "&".to_owned())
         ]
     );
-    assert!(parse_query(None).expect("empty").is_empty());
+    assert_eq!(
+        parse_query(None).expect("empty"),
+        [] as [(std::string::String, std::string::String); 0]
+    );
     assert_eq!(
         parse_query(Some("a=1&a=2")).expect_err("repeat").kind(),
         ErrorKind::InvalidRequest

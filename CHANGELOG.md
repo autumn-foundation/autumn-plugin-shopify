@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Support `autumn-web` 0.9. The plugin now needs `autumn-web` 0.9.
+
 ### Added
 
 - `ShopifyPlugin`: one-line setup for `autumn-web` 0.8. It declares the
