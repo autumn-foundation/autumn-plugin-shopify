@@ -12,7 +12,7 @@ Build Shopify apps on [Autumn](https://autumn-web.app). The plugin adds:
 # Cargo.toml
 [dependencies]
 autumn-plugin-shopify = { git = "https://github.com/autumn-foundation/autumn-plugin-shopify" }
-autumn-web = "0.8"
+autumn-web = "0.9"
 serde_json = "1"
 tracing = "0.1"
 ```

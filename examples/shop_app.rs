@@ -113,16 +113,18 @@ async fn shop_name(shopify: Shopify, Path(shop): Path<String>) -> AutumnResult<R
 
 #[autumn_web::main]
 async fn main() {
-    autumn_web::app()
-        .routes(routes![home, shop_name])
-        .plugin(
-            ShopifyPlugin::new()
-                .on_install(installed)
-                .webhook("orders/create", order_created)
-                .webhook(Topic::CUSTOMERS_DATA_REQUEST, customer_data_request)
-                .webhook(Topic::CUSTOMERS_REDACT, customer_redact)
-                .webhook(Topic::SHOP_REDACT, shop_redact),
-        )
-        .run()
-        .await;
+    Box::pin(
+        autumn_web::app()
+            .routes(routes![home, shop_name])
+            .plugin(
+                ShopifyPlugin::new()
+                    .on_install(installed)
+                    .webhook("orders/create", order_created)
+                    .webhook(Topic::CUSTOMERS_DATA_REQUEST, customer_data_request)
+                    .webhook(Topic::CUSTOMERS_REDACT, customer_redact)
+                    .webhook(Topic::SHOP_REDACT, shop_redact),
+            )
+            .run(),
+    )
+    .await;
 }
