@@ -1,6 +1,6 @@
 [package]
 name = "autumn-plugin-shopify"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 description = "Autumn plugin: Shopify apps — signed webhooks routed by topic, OAuth install with expiring tokens, and a throttle-aware Admin GraphQL client."
