@@ -88,7 +88,7 @@ fn contract_is_compatible_with_linked_autumn_web() {
         evaluate(&contract, AUTUMN_WEB_VERSION),
         ContractVerdict::Compatible
     );
-    for version in ["0.8.0", "0.10.0", "1.0.0"] {
+    for version in ["0.9.0", "0.11.0", "1.0.0"] {
         assert!(matches!(
             evaluate(&contract, version),
             ContractVerdict::Incompatible(_)

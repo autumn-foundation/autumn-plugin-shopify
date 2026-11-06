@@ -51,7 +51,7 @@ use crate::webhooks::{IntoWebhookHandler, WebhookHandler, WebhookRegistry};
 
 /// The `autumn-web` range this plugin supports. Keep it equal to the
 /// `autumn-web` requirement in `Cargo.toml`.
-const SUPPORTED_AUTUMN_WEB: &str = "0.9";
+const SUPPORTED_AUTUMN_WEB: &str = "0.10";
 
 /// `client_for` refreshes a token that expires within this many seconds.
 pub const REFRESH_MARGIN_SECS: i64 = 60;
