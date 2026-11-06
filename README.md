@@ -29,7 +29,7 @@ scopes = ["read_orders", "write_products"]
 export SHOPIFY_API_SECRET="<client secret>"
 ```
 
-```rust
+```rust,no_run
 use autumn_plugin_shopify::{ShopifyPlugin, Topic, WebhookContext};
 use autumn_web::prelude::*;
 

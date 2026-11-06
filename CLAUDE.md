@@ -44,6 +44,8 @@ name the claim by its time.
 
 ## Rules
 
+- README Rust snippets are doctests. Make them compile; use `no_run`, not `ignore`.
+  `tests/doc_snippets.rs` checks the TOML snippets and the version pins in the docs.
 - Secrets travel only through `SHOPIFY_API_SECRET`,
   `SHOPIFY_API_SECRET_PREVIOUS`, `SHOPIFY_ACCESS_TOKEN`. Never in
   `autumn.toml`, code, logs, `Debug`, or error text.
