@@ -66,3 +66,8 @@ pub use tokens::{InMemoryTokenStore, ShopToken, TokenStore};
 pub use types::{ApiVersion, DEFAULT_API_VERSION, ShopDomain, Topic};
 pub use verify::{SecretSet, sign_query, sign_webhook, verify_query, verify_webhook};
 pub use webhooks::{VerifiedWebhook, WebhookContext, WebhookOutcome, WebhookRegistry};
+
+/// Compiles the Rust snippets of the README as doctests.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+pub struct ReadmeDoctests;
