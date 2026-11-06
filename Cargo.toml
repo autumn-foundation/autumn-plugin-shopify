@@ -1,8 +1,8 @@
 [package]
 name = "autumn-plugin-shopify"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
-rust-version = "1.88"
+rust-version = "1.97"
 description = "Autumn plugin: Shopify apps — signed webhooks routed by topic, OAuth install with expiring tokens, and a throttle-aware Admin GraphQL client."
 license = "Apache-2.0"
 repository = "https://github.com/autumn-foundation/autumn-plugin-shopify"
@@ -13,7 +13,7 @@ exclude = [".github/", "docs/", "CLAUDE.md", "clippy.toml", "proptest-regression
 
 [dependencies]
 # No default features: the host app selects the Autumn features.
-autumn-web = { version = "0.9", default-features = false }
+autumn-web = { version = "0.10", default-features = false }
 base64 = "0.22"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 hex = "0.4"

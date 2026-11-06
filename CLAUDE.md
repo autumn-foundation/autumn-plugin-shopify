@@ -11,7 +11,7 @@ export TMPDIR=~/workspace/.tmp-cargo                      # /tmp is a 512MB tmpf
 cargo fmt --all -- --check
 cargo clippy --locked --all-targets --all-features -- -D warnings
 cargo test --locked --all-targets --all-features
-cargo +1.88 clippy --locked --all-targets --all-features -- -D warnings   # MSRV
+cargo +1.97 clippy --locked --all-targets --all-features -- -D warnings   # MSRV
 cargo llvm-cov --summary-only                                            # keep >= 85 % lines
 ```
 
