@@ -193,7 +193,7 @@ pub fn config(toml: Option<&str>, extra: &[(&str, &str)]) -> ShopifyConfig {
 
 /// A test state at [`NOW`] with seeded entropy and `runtime` installed.
 pub fn state(runtime: Option<ShopifyRuntime>) -> AppState {
-    let now = autumn_web::reexports::chrono::DateTime::from_timestamp(NOW, 0).expect("valid time");
+    let now = autumn_web::time::Timestamp::from_second(NOW).expect("valid time");
     let state = AppState::for_test()
         .with_clock(Arc::new(FixedClock::at(now)))
         .with_entropy(Arc::new(SeededEntropy::new(7)));

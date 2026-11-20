@@ -303,7 +303,7 @@ async fn callback(state: &AppState, headers: &HeaderMap, query: Option<&str>) ->
         .filter(|code| !code.is_empty())
         .ok_or_else(|| Error::InvalidRequest("missing code parameter".to_owned()))?;
 
-    let now = state.clock().now().timestamp();
+    let now = state.clock().now().as_second();
     let token = exchange_code(runtime.keeper(), &shop, code, now).await?;
     let missing = missing_scopes(&runtime.config().scopes, &token.scopes());
     if !missing.is_empty() {

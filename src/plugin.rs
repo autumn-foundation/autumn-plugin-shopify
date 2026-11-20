@@ -51,7 +51,7 @@ use crate::webhooks::{IntoWebhookHandler, WebhookHandler, WebhookRegistry};
 
 /// The `autumn-web` range this plugin supports. Keep it equal to the
 /// `autumn-web` requirement in `Cargo.toml`.
-const SUPPORTED_AUTUMN_WEB: &str = "0.10";
+const SUPPORTED_AUTUMN_WEB: &str = "0.11";
 
 /// `client_for` refreshes a token that expires within this many seconds.
 pub const REFRESH_MARGIN_SECS: i64 = 60;
@@ -493,7 +493,7 @@ impl Shopify {
     ///
     /// See [`ShopifyRuntime::client_for`].
     pub async fn client_for(&self, shop: &ShopDomain) -> Result<ShopifyClient> {
-        let now = self.state.clock().now().timestamp();
+        let now = self.state.clock().now().as_second();
         self.runtime.client_for(shop, now).await
     }
 
