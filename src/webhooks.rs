@@ -347,7 +347,7 @@ pub enum WebhookOutcome {
 /// when the handler panics or a store fails.
 pub async fn process(state: &AppState, webhook: VerifiedWebhook) -> AutumnResult<WebhookOutcome> {
     let runtime = Arc::clone(&webhook.runtime);
-    let now = state.clock().now().timestamp();
+    let now = state.clock().now().as_second();
     let claim = runtime
         .delivery_store()
         .claim(&webhook.webhook_id, now)
@@ -466,9 +466,9 @@ fn check_body_shop(webhook: &VerifiedWebhook) -> Result<()> {
 
 /// Parse an RFC 3339 time into Unix seconds.
 fn parse_time(text: &str) -> Option<i64> {
-    autumn_web::reexports::chrono::DateTime::parse_from_rfc3339(text)
+    text.parse::<autumn_web::time::Timestamp>()
         .ok()
-        .map(|time| time.timestamp())
+        .map(autumn_web::time::Timestamp::as_second)
 }
 
 /// True when `err` comes from the body length limit.
